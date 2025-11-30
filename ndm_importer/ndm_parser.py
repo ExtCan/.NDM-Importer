@@ -352,14 +352,99 @@ def parse_single_node(data: bytes, node_offset: int,
 
 
 def parse_face_data(data: bytes, offset: int, num_vertices: int) -> List[Tuple[int, int, int]]:
-    """Parse face/triangle data from the given offset."""
+    """Parse face/triangle data from the given offset.
+    
+    The face data uses GX display list format:
+    - Command byte (0x80 = tristrip, 0x90 = trilist, 0x98 = quads)
+    - Vertex count (16-bit big-endian)
+    - Vertex data (2 bytes per vertex: position index + attribute)
+    """
     faces = []
-    max_faces = num_vertices * 2  # Reasonable upper limit
+    max_faces = num_vertices * 4  # Reasonable upper limit
+    
+    pos = offset
+    
+    # Search for GX display list commands
+    while pos < len(data) - 4 and len(faces) < max_faces:
+        cmd = data[pos]
+        
+        # GX primitive commands: 0x80=tristrip, 0x90=trilist, 0x98=quads, 0xA0=lines, 0xB0=linestrip, 0xB8=points
+        if cmd in [0x80, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8]:
+            if pos + 3 > len(data):
+                break
+                
+            vert_count = read_uint16_be(data, pos + 1)
+            
+            # Sanity check
+            if vert_count == 0 or vert_count > 10000:
+                pos += 1
+                continue
+            
+            # Read vertex indices (2 bytes per vertex: index + attribute)
+            vertex_data_start = pos + 3
+            vertex_indices = []
+            
+            for i in range(vert_count):
+                idx_pos = vertex_data_start + i * 2
+                if idx_pos + 2 > len(data):
+                    break
+                vertex_idx = data[idx_pos]
+                if vertex_idx < num_vertices:
+                    vertex_indices.append(vertex_idx)
+                else:
+                    # If we hit invalid indices, the format might be different
+                    break
+            
+            if len(vertex_indices) < 3:
+                pos += 1
+                continue
+            
+            # Convert primitives to triangles
+            if cmd == 0x80:  # Triangle strip
+                for i in range(len(vertex_indices) - 2):
+                    v0, v1, v2 = vertex_indices[i], vertex_indices[i+1], vertex_indices[i+2]
+                    # Skip degenerate triangles
+                    if v0 != v1 and v1 != v2 and v0 != v2:
+                        if i % 2 == 0:
+                            faces.append((v0, v1, v2))
+                        else:
+                            faces.append((v0, v2, v1))  # Flip winding for odd triangles
+                            
+            elif cmd == 0x90:  # Triangle list
+                for i in range(0, len(vertex_indices) - 2, 3):
+                    v0, v1, v2 = vertex_indices[i], vertex_indices[i+1], vertex_indices[i+2]
+                    if v0 != v1 and v1 != v2 and v0 != v2:
+                        faces.append((v0, v1, v2))
+                        
+            elif cmd == 0x98:  # Quad list
+                for i in range(0, len(vertex_indices) - 3, 4):
+                    v0, v1, v2, v3 = vertex_indices[i], vertex_indices[i+1], vertex_indices[i+2], vertex_indices[i+3]
+                    # Split quad into two triangles
+                    if v0 != v1 and v1 != v2 and v0 != v2:
+                        faces.append((v0, v1, v2))
+                    if v0 != v2 and v2 != v3 and v0 != v3:
+                        faces.append((v0, v2, v3))
+            
+            # Move past this command
+            pos = vertex_data_start + vert_count * 2
+        else:
+            pos += 1
+    
+    # If no GX commands found, try the old simple format
+    if len(faces) == 0:
+        faces = parse_face_data_simple(data, offset, num_vertices)
+    
+    return faces
+
+
+def parse_face_data_simple(data: bytes, offset: int, num_vertices: int) -> List[Tuple[int, int, int]]:
+    """Parse face data in simple (index, flags) pair format."""
+    faces = []
+    max_faces = num_vertices * 2
     
     pos = offset
     while pos + 6 <= len(data) and len(faces) < max_faces:
         # Face format is (vertex_index, flags) pairs
-        # Read 3 pairs for each triangle
         idx0 = data[pos]
         flg0 = data[pos + 1]
         idx1 = data[pos + 2]
@@ -374,11 +459,9 @@ def parse_face_data(data: bytes, offset: int, num_vertices: int) -> List[Tuple[i
         
         # Validate indices
         if idx0 < num_vertices and idx1 < num_vertices and idx2 < num_vertices:
-            # Skip degenerate triangles
             if not (idx0 == idx1 or idx1 == idx2 or idx0 == idx2):
                 faces.append((idx0, idx1, idx2))
         else:
-            # Invalid indices might mean end of face data
             break
         
         pos += 6

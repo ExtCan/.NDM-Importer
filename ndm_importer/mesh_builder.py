@@ -134,8 +134,18 @@ def create_materials(
                     mat.blend_method = 'BLEND'
 
         # Set some default material properties
-        principled.inputs['Roughness'].default_value = 0.5
-        principled.inputs['Specular IOR Level'].default_value = 0.3
+        try:
+            principled.inputs['Roughness'].default_value = 0.5
+        except KeyError:
+            pass
+        # Handle different Blender versions for Specular
+        try:
+            principled.inputs['Specular IOR Level'].default_value = 0.3
+        except KeyError:
+            try:
+                principled.inputs['Specular'].default_value = 0.3
+            except KeyError:
+                pass
 
         materials.append(mat)
 
@@ -230,8 +240,15 @@ def create_mesh_object(
                 normals.append(Vector((0, 0, 1)))
 
         if normals and len(normals) == len(mesh.vertices):
-            mesh.use_auto_smooth = True
-            mesh.normals_split_custom_set_from_vertices(normals)
+            # use_auto_smooth was deprecated in Blender 4.0
+            try:
+                mesh.use_auto_smooth = True
+            except AttributeError:
+                pass  # Blender 4.0+
+            try:
+                mesh.normals_split_custom_set_from_vertices(normals)
+            except Exception:
+                pass  # In case normals can't be set
 
     # Assign materials
     if materials:
