@@ -337,7 +337,8 @@ def parse_single_node(data: bytes, node_offset: int,
     face_offset = uv_offset + len(vertices) * 2
     
     # Skip to face data if we have a relative offset
-    if face_rel_offset > 0 and face_rel_offset < 0x10000:
+    # The offset can be larger than 0x10000 for big models
+    if face_rel_offset > 0 and face_rel_offset < len(data):
         face_offset = geom_data_offset + face_rel_offset
 
     faces = parse_face_data(data, face_offset, len(vertices))
