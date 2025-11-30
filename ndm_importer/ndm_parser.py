@@ -264,14 +264,24 @@ def parse_single_node(data: bytes, node_offset: int,
     node = NDMNode(name=name)
 
     # Read transform data at +32
+    # The layout seems to be:
+    # +32: position x, y, z (3 floats or 6 bytes as int16s)
+    # +44: scale x, y, z (3 floats) - actually at +40, +44, +48
     transform_offset = node_offset + 32
+    
     try:
-        # Position/scale are stored as floats
-        node.scale = (
-            read_float_be(data, transform_offset + 8),
-            read_float_be(data, transform_offset + 12),
-            read_float_be(data, transform_offset + 16),
-        )
+        # Check if we have valid float values for scale
+        scale_x = read_float_be(data, transform_offset + 8)
+        scale_y = read_float_be(data, transform_offset + 12)
+        scale_z = read_float_be(data, transform_offset + 16)
+        
+        # Validate scale values (should be reasonable, not NaN or extremely large)
+        if (not (scale_x != scale_x) and not (scale_y != scale_y) and not (scale_z != scale_z) and
+            abs(scale_x) < 1000 and abs(scale_y) < 1000 and abs(scale_z) < 1000 and
+            abs(scale_x) > 0.0001 and abs(scale_y) > 0.0001 and abs(scale_z) > 0.0001):
+            node.scale = (scale_x, scale_y, scale_z)
+        else:
+            node.scale = (1.0, 1.0, 1.0)
     except Exception:
         node.scale = (1.0, 1.0, 1.0)
 

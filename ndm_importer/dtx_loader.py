@@ -44,86 +44,73 @@ def parse_dtx_header(data: bytes) -> Optional[dict]:
     """
     Parse DTX header and return format information.
     
-    DTX Header format (8 bytes):
-    - byte 0-1: Format flags (e.g., 0x0004 = RGBA8, 0x0808 = indexed)
-    - byte 2-3: Additional flags
-    - byte 4-5: Width/format info
-    - byte 6-7: Height/format info
+    DTX Header format:
+    - byte 0-1: Format flags
+    - byte 2: Width power of 2 (width = 2^value)
+    - byte 3: Height power of 2 (height = 2^value)
+    - byte 4-5: Additional flags
+    - byte 6-7: Data size
     """
     if len(data) < 8:
         return None
 
     # Parse header bytes
     format_flags = read_uint16_be(data, 0)
-    flags2 = read_uint16_be(data, 2)
-    width_info = read_uint16_be(data, 4)
-    height_info = read_uint16_be(data, 6)
+    width_power = data[2]  # Width = 2^this value
+    height_power = data[3]  # Height = 2^this value
+    flags2 = read_uint16_be(data, 4)
+    data_size_header = read_uint16_be(data, 6)
 
-    # Determine texture dimensions
-    # Common dimensions are powers of 2: 32, 64, 128, 256
+    # Calculate dimensions from powers of 2
+    width = 1 << width_power if width_power <= 10 else 0
+    height = 1 << height_power if height_power <= 10 else 0
     
-    # Try to extract dimensions from header
-    # The format varies, so we'll try multiple interpretations
+    format_type = 'rgb565'  # Default format
     
-    width = 0
-    height = 0
-    format_type = 'unknown'
+    # Validate dimensions against actual data size
+    pixel_data_start = 32  # 32-byte header
+    actual_data_size = len(data) - pixel_data_start
+    expected_data_size = width * height * 2  # RGB565 = 2 bytes per pixel
     
-    # Format 0x0004 0x0808 appears to be common
-    if format_flags == 0x0004:
-        # Likely 8x8 blocks or similar
-        format_type = 'block'
-        # Dimensions may be encoded in other fields
-        width = 64  # Default fallback
-        height = 64
-    elif format_flags == 0x0808:
-        format_type = 'rgb565'
-        width = 32
-        height = 32
-    
-    # Try to compute dimensions from file size
-    pixel_data_start = 32  # Assume 32-byte header
-    data_size = len(data) - pixel_data_start
-    
-    # For RGB565, each pixel is 2 bytes
-    pixel_count = data_size // 2
-    
-    # Common texture sizes
-    common_sizes = [
-        (256, 256), (256, 128), (128, 256),
-        (128, 128), (128, 64), (64, 128),
-        (64, 64), (64, 32), (32, 64),
-        (32, 32), (32, 16), (16, 32),
-        (16, 16), (8, 8),
-    ]
-    
-    for w, h in common_sizes:
-        if w * h == pixel_count:
-            width = w
-            height = h
-            break
-    
-    if width == 0 or height == 0:
-        # Try to guess from file size
-        import math
-        side = int(math.sqrt(pixel_count))
-        if side * side == pixel_count:
-            width = height = side
-        else:
-            # Non-square texture
-            for factor in range(1, 512):
-                if pixel_count % factor == 0:
-                    other = pixel_count // factor
-                    if other <= 512 and factor <= 512:
-                        width = other
-                        height = factor
-                        break
+    # If dimensions don't match, try to infer from data size
+    if width == 0 or height == 0 or expected_data_size != actual_data_size:
+        # Try common sizes
+        pixel_count = actual_data_size // 2
+        common_sizes = [
+            (256, 256), (256, 128), (128, 256),
+            (128, 128), (128, 64), (64, 128),
+            (64, 64), (64, 32), (32, 64),
+            (32, 32), (32, 16), (16, 32),
+            (16, 16), (8, 8),
+        ]
+        
+        for w, h in common_sizes:
+            if w * h == pixel_count:
+                width = w
+                height = h
+                break
+        
+        if width == 0 or height == 0:
+            # Try to guess from file size
+            import math
+            side = int(math.sqrt(pixel_count))
+            if side > 0 and side * side == pixel_count:
+                width = height = side
+            else:
+                # Non-square texture - find factors
+                for factor in range(1, 512):
+                    if pixel_count % factor == 0:
+                        other = pixel_count // factor
+                        if other <= 512 and factor <= 512:
+                            width = other
+                            height = factor
+                            break
 
     return {
         'format_flags': format_flags,
         'flags2': flags2,
-        'width_info': width_info,
-        'height_info': height_info,
+        'width_power': width_power,
+        'height_power': height_power,
         'width': width,
         'height': height,
         'format_type': format_type,
