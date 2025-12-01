@@ -269,9 +269,6 @@ def parse_single_node(data: bytes, node_offset: int,
     node = NDMNode(name=name)
 
     # Read transform data at +32
-    # The layout seems to be:
-    # +32: position x, y, z (3 floats or 6 bytes as int16s)
-    # +44: scale x, y, z (3 floats) - actually at +40, +44, +48
     transform_offset = node_offset + 32
     
     try:
@@ -290,29 +287,34 @@ def parse_single_node(data: bytes, node_offset: int,
     except Exception:
         node.scale = (1.0, 1.0, 1.0)
 
-    # Geometry descriptor at +80
+    # Geometry descriptor at +80 (0x50 from node start)
+    # The descriptor contains offsets to UV data and display list
     geom_desc_offset = node_offset + 80
     
-    # Read geometry sizes from descriptor
-    vertex_data_size = read_uint32_be(data, geom_desc_offset)
-    uv_rel_offset = read_uint32_be(data, geom_desc_offset + 4)
-    face_rel_offset = read_uint32_be(data, geom_desc_offset + 8)
+    # Read geometry offsets from descriptor
+    # Format at +80: offsets and sizes for vertex/UV/face data
+    # At +0x74 (node+116): UV data offset
+    # At +0x78 (node+120): display list offset
+    uv_data_offset = read_uint32_be(data, node_offset + 116)
+    display_list_offset = read_uint32_be(data, node_offset + 120)
     
-    # Validate sizes
-    if vertex_data_size == 0 or vertex_data_size > 0x100000:
-        # Try alternate offset
-        return parse_node_geometry_fallback(data, node_offset, node)
-
-    # Geometry data starts at +128
+    # Geometry data (vertices) starts at +128 from node
     geom_data_offset = node_offset + 128
     
-    # Calculate vertex count (6 bytes per vertex: int16 x, y, z)
+    # Calculate vertex count: vertices are 6 bytes each (int16 x, y, z)
+    # Vertex data ends at UV data offset
+    if uv_data_offset > 0 and uv_data_offset > geom_data_offset:
+        vertex_data_size = uv_data_offset - geom_data_offset
+    else:
+        # Fallback: use old method
+        vertex_data_size = read_uint32_be(data, geom_desc_offset)
+    
     num_vertices = vertex_data_size // 6
     
     if num_vertices < 3 or num_vertices > 100000:
         return parse_node_geometry_fallback(data, node_offset, node)
 
-    # Read vertices
+    # Read vertices (6 bytes each: int16 x, y, z)
     vertices = []
     for i in range(num_vertices):
         vert_offset = geom_data_offset + i * 6
@@ -326,37 +328,28 @@ def parse_single_node(data: bytes, node_offset: int,
     if len(vertices) < 3:
         return node
 
-    # Read UVs (at vertex_data_offset + vertex_data_size, or use relative offset)
-    uv_offset = geom_data_offset + vertex_data_size
+    # Read UVs at UV data offset
     uvs = []
-    for i in range(len(vertices)):
-        uv_pos = uv_offset + i * 2  # UVs are 2 bytes each (u8, u8)
-        if uv_pos + 2 > len(data):
-            break
-        u = data[uv_pos] / 255.0
-        v = data[uv_pos + 1] / 255.0
-        uvs.append((u, v))
+    if uv_data_offset > 0:
+        for i in range(len(vertices)):
+            uv_pos = uv_data_offset + i * 2  # UVs are 2 bytes each (u8, u8)
+            if uv_pos + 2 > len(data):
+                break
+            u = data[uv_pos] / 255.0
+            v = data[uv_pos + 1] / 255.0
+            uvs.append((u, v))
 
-    # Read faces
-    # Try to find display list data by scanning for valid commands
-    # First, try the offset from descriptor
-    face_offset = geom_data_offset + face_rel_offset if face_rel_offset > 0 else uv_offset + len(vertices) * 2
-    
-    # Search for first valid display list command
-    # The display list might not start exactly at the calculated offset
-    search_start = geom_data_offset + vertex_data_size  # Start after vertex data
-    search_end = min(search_start + 0x1000, len(data))  # Search up to 4KB after vertices
-    
-    found_offset = find_display_list_start(data, search_start, search_end, len(vertices))
-    if found_offset >= 0:
-        face_offset = found_offset
-    
-    faces = parse_face_data(data, face_offset, len(vertices))
+    # Read faces from display list
+    # Display list uses 16-bit little-endian indices in triangle strip format
+    if display_list_offset > 0:
+        faces = parse_display_list(data, display_list_offset, len(vertices))
+    else:
+        faces = []
 
     # Create vertex list with UVs
     # Scale factor: divide by 25600 to match expected output
     # Axis transformation: X stays, Z becomes Y, -Y becomes Z (rotate 90 around X)
-    scale = 1.0 / 25600.0  # Correct scale factor for vertex positions
+    scale = 1.0 / 25600.0
     for i, (x, y, z) in enumerate(vertices):
         uv = uvs[i] if i < len(uvs) else None
         # Apply axis transformation: (x, y, z) -> (x, z, -y)
@@ -378,6 +371,37 @@ def parse_single_node(data: bytes, node_offset: int,
                     node.faces.append(NDMFace(indices=(idx0, idx1, idx2)))
 
     return node
+
+
+def parse_display_list(data: bytes, offset: int, num_vertices: int) -> List[Tuple[int, int, int]]:
+    """Parse display list with 16-bit little-endian indices as triangle strip."""
+    import struct as st
+    faces = []
+    
+    # Read indices until end of file or invalid index
+    indices = []
+    pos = offset
+    while pos + 2 <= len(data):
+        idx = st.unpack('<H', data[pos:pos+2])[0]
+        if idx >= num_vertices:
+            break
+        indices.append(idx)
+        pos += 2
+        # Limit to reasonable size
+        if len(indices) > 50000:
+            break
+    
+    # Generate triangles from strip
+    for i in range(len(indices) - 2):
+        v0, v1, v2 = indices[i], indices[i+1], indices[i+2]
+        # Skip degenerate triangles
+        if v0 != v1 and v1 != v2 and v0 != v2:
+            if i % 2 == 0:
+                faces.append((v0, v1, v2))
+            else:
+                faces.append((v0, v2, v1))  # Alternate winding
+    
+    return faces
 
 
 def find_display_list_start(data: bytes, start: int, end: int, num_vertices: int) -> int:
