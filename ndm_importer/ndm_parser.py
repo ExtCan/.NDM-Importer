@@ -288,27 +288,19 @@ def parse_single_node(data: bytes, node_offset: int,
         node.scale = (1.0, 1.0, 1.0)
 
     # Geometry descriptor at +80 (0x50 from node start)
-    # The descriptor contains offsets to UV data and display list
+    # The descriptor contains offsets and sizes for vertex/UV/face data
     geom_desc_offset = node_offset + 80
     
-    # Read geometry offsets from descriptor
-    # Format at +80: offsets and sizes for vertex/UV/face data
-    # At +0x74 (node+116): UV data offset
-    # At +0x78 (node+120): display list offset
-    uv_data_offset = read_uint32_be(data, node_offset + 116)
-    display_list_offset = read_uint32_be(data, node_offset + 120)
+    # Read geometry size info from descriptor
+    # At node+0x50 (0xB0 for KURIBO): vertex data size
+    # At node+0x58 (0xB8 for KURIBO): total geometry size
+    vertex_data_size = read_uint32_be(data, node_offset + 0x50)
+    total_geom_size = read_uint32_be(data, node_offset + 0x58)
     
     # Geometry data (vertices) starts at +128 from node
     geom_data_offset = node_offset + 128
     
     # Calculate vertex count: vertices are 6 bytes each (int16 x, y, z)
-    # Vertex data ends at UV data offset
-    if uv_data_offset > 0 and uv_data_offset > geom_data_offset:
-        vertex_data_size = uv_data_offset - geom_data_offset
-    else:
-        # Fallback: use old method
-        vertex_data_size = read_uint32_be(data, geom_desc_offset)
-    
     num_vertices = vertex_data_size // 6
     
     if num_vertices < 3 or num_vertices > 100000:
@@ -328,23 +320,14 @@ def parse_single_node(data: bytes, node_offset: int,
     if len(vertices) < 3:
         return node
 
-    # Read UVs at UV data offset
+    # UV data would be after vertex data, but for now we skip UVs
+    # TODO: Parse UV coordinates properly
     uvs = []
-    if uv_data_offset > 0:
-        for i in range(len(vertices)):
-            uv_pos = uv_data_offset + i * 2  # UVs are 2 bytes each (u8, u8)
-            if uv_pos + 2 > len(data):
-                break
-            u = data[uv_pos] / 255.0
-            v = data[uv_pos + 1] / 255.0
-            uvs.append((u, v))
 
-    # Read faces from display list
-    # Display list uses 16-bit little-endian indices in triangle strip format
-    if display_list_offset > 0:
-        faces = parse_display_list(data, display_list_offset, len(vertices))
-    else:
-        faces = []
+    # Display list starts after vertex data (+ some header/attribute data)
+    # The parser will scan for valid primitive commands
+    display_list_start = geom_data_offset + vertex_data_size
+    faces = parse_display_list(data, display_list_start, len(vertices))
 
     # Create vertex list with UVs
     # Scale factor: divide by 25600 to match expected output
@@ -374,32 +357,132 @@ def parse_single_node(data: bytes, node_offset: int,
 
 
 def parse_display_list(data: bytes, offset: int, num_vertices: int) -> List[Tuple[int, int, int]]:
-    """Parse display list with 16-bit little-endian indices as triangle strip."""
-    import struct as st
+    """Parse GX display list commands with 16-bit big-endian indices.
+    
+    This function handles two formats:
+    1. GX display list with command bytes (0x80=tristrip, 0x90=trilist, 0x98=quads)
+    2. Raw index arrays without command bytes
+    
+    After vertex data, there may be UV/normal attribute data before the actual
+    primitive commands. We scan for valid primitive commands with reasonable counts.
+    """
     faces = []
     
-    # Read indices until end of file or invalid index
-    indices = []
+    # First, try to find GX command headers
     pos = offset
-    while pos + 2 <= len(data):
-        idx = st.unpack('<H', data[pos:pos+2])[0]
-        if idx >= num_vertices:
-            break
-        indices.append(idx)
-        pos += 2
-        # Limit to reasonable size
-        if len(indices) > 50000:
-            break
+    max_search = min(offset + 0x1000, len(data) - 3)  # Search up to 4KB
+    found_gx_commands = False
     
-    # Generate triangles from strip
-    for i in range(len(indices) - 2):
-        v0, v1, v2 = indices[i], indices[i+1], indices[i+2]
-        # Skip degenerate triangles
-        if v0 != v1 and v1 != v2 and v0 != v2:
-            if i % 2 == 0:
-                faces.append((v0, v1, v2))
-            else:
-                faces.append((v0, v2, v1))  # Alternate winding
+    while pos < max_search:
+        cmd = data[pos]
+        if cmd in [0x80, 0x90, 0x98]:
+            count = read_uint16_be(data, pos + 1)
+            # Real primitive commands have reasonable counts (3-500 typically)
+            if 3 <= count <= 500:
+                # Verify first few indices are valid
+                valid = True
+                for i in range(min(3, count)):
+                    idx_pos = pos + 3 + i * 2
+                    if idx_pos + 2 > len(data):
+                        valid = False
+                        break
+                    idx = read_uint16_be(data, idx_pos)
+                    if idx >= num_vertices:
+                        valid = False
+                        break
+                if valid:
+                    found_gx_commands = True
+                    break
+        pos += 1
+    
+    if found_gx_commands:
+        # Parse GX commands with explicit headers
+        max_faces = num_vertices * 3
+        end_pos = min(len(data), offset + 0x50000)  # Limit search range
+        
+        while pos < end_pos - 3 and len(faces) < max_faces:
+            cmd = data[pos]
+            if cmd not in [0x80, 0x90, 0x98]:
+                pos += 1
+                continue
+            
+            count = read_uint16_be(data, pos + 1)
+            if count < 3 or count > 5000:
+                pos += 1
+                continue
+            
+            # Read indices
+            indices = []
+            valid = True
+            for i in range(count):
+                idx_pos = pos + 3 + i * 2
+                if idx_pos + 2 > len(data):
+                    valid = False
+                    break
+                idx = read_uint16_be(data, idx_pos)
+                if idx >= num_vertices:
+                    valid = False
+                    break
+                indices.append(idx)
+            
+            if not valid or len(indices) < 3:
+                pos += 1
+                continue
+            
+            # Generate faces based on primitive type
+            if cmd == 0x80:  # Triangle strip
+                for i in range(len(indices) - 2):
+                    v0, v1, v2 = indices[i], indices[i+1], indices[i+2]
+                    if v0 != v1 and v1 != v2 and v0 != v2:
+                        if i % 2 == 0:
+                            faces.append((v0, v1, v2))
+                        else:
+                            faces.append((v0, v2, v1))
+            elif cmd == 0x90:  # Triangle list
+                for i in range(0, len(indices) - 2, 3):
+                    v0, v1, v2 = indices[i], indices[i+1], indices[i+2]
+                    if v0 != v1 and v1 != v2 and v0 != v2:
+                        faces.append((v0, v1, v2))
+            elif cmd == 0x98:  # Quad list
+                for i in range(0, len(indices) - 3, 4):
+                    v0, v1, v2, v3 = indices[i], indices[i+1], indices[i+2], indices[i+3]
+                    if v0 != v1 and v1 != v2 and v0 != v2:
+                        faces.append((v0, v1, v2))
+                    if v0 != v2 and v2 != v3 and v0 != v3:
+                        faces.append((v0, v2, v3))
+            
+            # Move past this command
+            pos = pos + 3 + count * 2
+    else:
+        # Fallback: try to parse raw index arrays
+        # Scan for sequences of valid 16-bit indices
+        pos = offset
+        max_scan = min(offset + 0x2000, len(data) - 6)
+        
+        while pos < max_scan:
+            # Look for a sequence of valid indices
+            indices = []
+            scan_pos = pos
+            while scan_pos + 2 <= len(data) and len(indices) < 5000:
+                idx = read_uint16_be(data, scan_pos)
+                if idx < num_vertices:
+                    indices.append(idx)
+                    scan_pos += 2
+                else:
+                    break
+            
+            if len(indices) >= 3:
+                # Treat as triangle strip
+                for i in range(len(indices) - 2):
+                    v0, v1, v2 = indices[i], indices[i+1], indices[i+2]
+                    if v0 != v1 and v1 != v2 and v0 != v2:
+                        if i % 2 == 0:
+                            faces.append((v0, v1, v2))
+                        else:
+                            faces.append((v0, v2, v1))
+                break  # Found valid data, stop scanning
+            
+            pos += 2
     
     return faces
 
