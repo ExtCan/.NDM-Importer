@@ -202,22 +202,27 @@ def parse_mesh_blocks(data: bytes, start_offset: int, expected_nodes: int,
     """Parse mesh data blocks from the NDM file."""
     nodes = []
     
+    # Respect the expected node count from the header
+    # Only parse up to expected_nodes, with a safety maximum of 50
+    max_nodes = min(expected_nodes, 50) if expected_nodes > 0 else 1
+    
     # Find all node blocks by scanning for valid names
     offset = start_offset
     
-    while offset < len(data) - 128 and len(nodes) < max(expected_nodes, 100):
+    while offset < len(data) - 128 and len(nodes) < max_nodes:
         # Try to find a valid node block (starts with a name)
         name = read_string(data, offset, 32)
         
-        # Check if this looks like a valid node name
-        if name and len(name) >= 1 and is_valid_name(name):
+        # Check if this looks like a valid node name (at least 2 chars, mostly lowercase)
+        if name and len(name) >= 2 and is_valid_name(name):
             node = parse_single_node(data, offset, materials)
-            if node and (len(node.vertices) > 0 or len(node.faces) > 0):
+            if node and len(node.vertices) > 0:
                 nodes.append(node)
+                # Once we have found expected_nodes, stop
+                if len(nodes) >= max_nodes:
+                    break
             
             # Move to next potential node block
-            # Node blocks are 128 bytes header + variable geometry
-            # Try to find the next node by looking for the next valid name
             offset = find_next_node_offset(data, offset + 128)
         else:
             offset += 4  # Try next alignment
@@ -360,12 +365,17 @@ def parse_single_node(data: bytes, node_offset: int,
             uv=uv,
         ))
 
-    # Add faces
+    # Add faces, deduplicating by vertex indices (ignoring winding order)
+    seen_faces = set()
     for face_indices in faces:
         if len(face_indices) >= 3:
             idx0, idx1, idx2 = face_indices[0], face_indices[1], face_indices[2]
             if idx0 < len(vertices) and idx1 < len(vertices) and idx2 < len(vertices):
-                node.faces.append(NDMFace(indices=(idx0, idx1, idx2)))
+                # Create a normalized key for deduplication (sorted indices)
+                face_key = tuple(sorted([idx0, idx1, idx2]))
+                if face_key not in seen_faces:
+                    seen_faces.add(face_key)
+                    node.faces.append(NDMFace(indices=(idx0, idx1, idx2)))
 
     return node
 
