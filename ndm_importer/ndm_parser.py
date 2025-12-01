@@ -349,11 +349,14 @@ def parse_single_node(data: bytes, node_offset: int,
     faces = parse_face_data(data, face_offset, len(vertices))
 
     # Create vertex list with UVs
-    scale = 1.0 / 256.0  # Scale factor for vertex positions
+    # Scale factor: divide by 25600 to match expected output
+    # Axis transformation: X stays, Z becomes Y, -Y becomes Z (rotate 90 around X)
+    scale = 1.0 / 25600.0  # Correct scale factor for vertex positions
     for i, (x, y, z) in enumerate(vertices):
         uv = uvs[i] if i < len(uvs) else None
+        # Apply axis transformation: (x, y, z) -> (x, z, -y)
         node.vertices.append(NDMVertex(
-            position=(x * scale, y * scale, z * scale),
+            position=(x * scale, z * scale, -y * scale),
             uv=uv,
         ))
 
