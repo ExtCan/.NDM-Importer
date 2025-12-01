@@ -333,14 +333,19 @@ def parse_single_node(data: bytes, node_offset: int,
         uvs.append((u, v))
 
     # Read faces
-    # Face data starts after UVs
-    face_offset = uv_offset + len(vertices) * 2
+    # Try to find display list data by scanning for valid commands
+    # First, try the offset from descriptor
+    face_offset = geom_data_offset + face_rel_offset if face_rel_offset > 0 else uv_offset + len(vertices) * 2
     
-    # Skip to face data if we have a relative offset
-    # The offset can be larger than 0x10000 for big models
-    if face_rel_offset > 0 and face_rel_offset < len(data):
-        face_offset = geom_data_offset + face_rel_offset
-
+    # Search for first valid display list command
+    # The display list might not start exactly at the calculated offset
+    search_start = geom_data_offset + vertex_data_size  # Start after vertex data
+    search_end = min(search_start + 0x1000, len(data))  # Search up to 4KB after vertices
+    
+    found_offset = find_display_list_start(data, search_start, search_end, len(vertices))
+    if found_offset >= 0:
+        face_offset = found_offset
+    
     faces = parse_face_data(data, face_offset, len(vertices))
 
     # Create vertex list with UVs
@@ -362,25 +367,73 @@ def parse_single_node(data: bytes, node_offset: int,
     return node
 
 
+def find_display_list_start(data: bytes, start: int, end: int, num_vertices: int) -> int:
+    """Find the start of valid GX display list data."""
+    use_16bit = num_vertices > 255
+    
+    for offset in range(start, min(end, len(data) - 5)):
+        if data[offset] in [0x80, 0x90, 0x98]:
+            count = read_uint16_be(data, offset + 1)
+            
+            # Reasonable count range
+            if count < 3 or count > 5000:
+                continue
+            
+            # Check if first few indices are valid
+            valid = True
+            for i in range(min(3, count)):
+                if use_16bit:
+                    if offset + 3 + i * 2 + 2 > len(data):
+                        valid = False
+                        break
+                    idx = read_uint16_be(data, offset + 3 + i * 2)
+                else:
+                    if offset + 3 + i >= len(data):
+                        valid = False
+                        break
+                    idx = data[offset + 3 + i]
+                
+                if idx >= num_vertices:
+                    valid = False
+                    break
+            
+            if valid:
+                return offset
+    
+    return -1
+
+
 def parse_face_data(data: bytes, offset: int, num_vertices: int) -> List[Tuple[int, int, int]]:
     """Parse face/triangle data from the given offset.
     
     The face data uses GX display list format:
     - Command byte (0x80 = tristrip, 0x90 = trilist, 0x98 = quads)
     - Vertex count (16-bit big-endian)
-    - Vertex data (2 bytes per vertex: position index + attribute)
+    - Vertex indices (16-bit big-endian each for models with >255 vertices,
+                     8-bit for smaller models)
     """
     faces = []
-    max_faces = num_vertices * 4  # Reasonable upper limit
+    max_faces = min(num_vertices * 4, 100000)  # Reasonable upper limit
+    
+    # Determine index size based on vertex count
+    # If we have more than 255 vertices, indices must be 16-bit
+    use_16bit_indices = num_vertices > 255
+    bytes_per_index = 2 if use_16bit_indices else 1
     
     pos = offset
+    # Limit search to reasonable size based on vertex count
+    # Expect roughly 2-3 bytes per face average
+    max_search_size = min(num_vertices * bytes_per_index * 3, 0x50000)  # Max ~300KB
+    max_search_pos = min(offset + max_search_size, len(data))
+    commands_processed = 0
+    max_commands = 200  # Limit number of display list commands to process
     
     # Search for GX display list commands
-    while pos < len(data) - 4 and len(faces) < max_faces:
+    while pos < max_search_pos - 4 and len(faces) < max_faces and commands_processed < max_commands:
         cmd = data[pos]
         
-        # GX primitive commands: 0x80=tristrip, 0x90=trilist, 0x98=quads, 0xA0=lines, 0xB0=linestrip, 0xB8=points
-        if cmd in [0x80, 0x90, 0x98, 0xA0, 0xA8, 0xB0, 0xB8]:
+        # GX primitive commands: 0x80=tristrip, 0x90=trilist, 0x98=quads
+        if cmd in [0x80, 0x90, 0x98]:
             if pos + 3 > len(data):
                 break
                 
@@ -391,24 +444,44 @@ def parse_face_data(data: bytes, offset: int, num_vertices: int) -> List[Tuple[i
                 pos += 1
                 continue
             
-            # Read vertex indices (2 bytes per vertex: index + attribute)
+            # Calculate expected data size
+            expected_size = vert_count * bytes_per_index
             vertex_data_start = pos + 3
+            
+            if vertex_data_start + expected_size > len(data):
+                pos += 1
+                continue
+            
+            # Read vertex indices
             vertex_indices = []
+            valid = True
             
             for i in range(vert_count):
-                idx_pos = vertex_data_start + i * 2
-                if idx_pos + 2 > len(data):
-                    break
-                vertex_idx = data[idx_pos]
+                if use_16bit_indices:
+                    idx_pos = vertex_data_start + i * 2
+                    if idx_pos + 2 > len(data):
+                        valid = False
+                        break
+                    vertex_idx = read_uint16_be(data, idx_pos)
+                else:
+                    idx_pos = vertex_data_start + i
+                    if idx_pos >= len(data):
+                        valid = False
+                        break
+                    vertex_idx = data[idx_pos]
+                
                 if vertex_idx < num_vertices:
                     vertex_indices.append(vertex_idx)
                 else:
-                    # If we hit invalid indices, the format might be different
+                    # Invalid index - this might not be a valid display list
+                    valid = False
                     break
             
-            if len(vertex_indices) < 3:
+            if not valid or len(vertex_indices) < 3:
                 pos += 1
                 continue
+            
+            commands_processed += 1
             
             # Convert primitives to triangles
             if cmd == 0x80:  # Triangle strip
@@ -437,7 +510,7 @@ def parse_face_data(data: bytes, offset: int, num_vertices: int) -> List[Tuple[i
                         faces.append((v0, v2, v3))
             
             # Move past this command
-            pos = vertex_data_start + vert_count * 2
+            pos = vertex_data_start + vert_count * bytes_per_index
         else:
             pos += 1
     
