@@ -41,6 +41,11 @@ Mesh data consists of:
 
 import struct
 import os
+import math
+
+# Minimum ratio of valid indices required when parsing vertex references.
+# 80% allows for some padding or invalid data at the end of display lists.
+MIN_VALID_INDEX_RATIO = 0.8
 
 # Blender imports - only available when running in Blender
 try:
@@ -133,7 +138,7 @@ class NDMParser:
         # Check for characteristic patterns:
         # - Scale 1.0 at offset 0x28 (third scale component)
         scale_z = struct.unpack_from('>f', self.data, offset + 0x28)[0]
-        if not (0.001 < abs(scale_z) < 10000 or scale_z != scale_z):
+        if not (0.001 < abs(scale_z) < 10000 or math.isnan(scale_z)):
             return False
             
         # Check for flags pattern at 0x2C (often 0x5498xxxx or 0x1400xxxx or 0xd480xxxx)
@@ -199,14 +204,14 @@ class NDMParser:
         # Parse position at offset 0x10
         # Could be floats or zeros
         fpx, fpy, fpz = struct.unpack_from('>3f', self.data, offset + 0x10)
-        if all(abs(f) < 100000 for f in [fpx, fpy, fpz] if f == f):
+        if all(abs(f) < 100000 for f in [fpx, fpy, fpz] if not math.isnan(f)):
             node.position = (fpx, fpy, fpz)
         else:
             node.position = (0.0, 0.0, 0.0)
         
         # Parse scale at offset 0x20
         sx, sy, sz = struct.unpack_from('>3f', self.data, offset + 0x20)
-        if all(0.0001 < abs(s) < 10000 for s in [sx, sy, sz] if s == s):
+        if all(0.0001 < abs(s) < 10000 for s in [sx, sy, sz] if not math.isnan(s)):
             node.scale = (sx, sy, sz)
         else:
             node.scale = (1.0, 1.0, 1.0)
@@ -226,10 +231,11 @@ class NDMParser:
         
         # Parse mesh info at 0x50
         # 0x50: vertex data size
-        # 0x54: additional data size (normals/UVs)
+        # 0x54: additional data size (normals/UVs) - reserved for future UV import
         # 0x58: display list size
         node.vertex_data_size = struct.unpack_from('>I', self.data, offset + 0x50)[0]
-        additional_size = struct.unpack_from('>I', self.data, offset + 0x54)[0]
+        # additional_size at 0x54 contains UV/normal data size, not yet used
+        _ = struct.unpack_from('>I', self.data, offset + 0x54)[0]
         node.display_list_size = struct.unpack_from('>I', self.data, offset + 0x58)[0]
         
         # Vertex counts at 0x5C
@@ -390,7 +396,7 @@ class NDMParser:
                     valid = False
                     break
             
-            if valid and len(indices) >= count * 0.8:  # Allow some invalid at end
+            if valid and len(indices) >= count * MIN_VALID_INDEX_RATIO:
                 return indices
         
         # Fallback: just read single bytes and filter
@@ -434,6 +440,7 @@ def import_ndm(context, filepath, import_textures=True, scale_factor=0.01):
     # Create objects for each node
     created_objects = {}
     mesh_count = 0
+    used_names = set()  # Track used names for O(1) duplicate checking
     
     for node in parser.nodes:
         if not node.name:
@@ -448,8 +455,12 @@ def import_ndm(context, filepath, import_textures=True, scale_factor=0.01):
                 
             faces = parser.get_mesh_faces(node, len(vertices))
             
-            # Create mesh
-            mesh_name = f"{node.name}_{mesh_count}" if node.name in [n.name for n in parser.nodes[:parser.nodes.index(node)]] else node.name
+            # Create mesh with unique name
+            if node.name in used_names:
+                mesh_name = f"{node.name}_{mesh_count}"
+            else:
+                mesh_name = node.name
+            used_names.add(mesh_name)
             mesh = bpy.data.meshes.new(mesh_name)
             
             # Scale vertices

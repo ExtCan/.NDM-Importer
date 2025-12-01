@@ -16,7 +16,7 @@ bl_info = {
 }
 
 import bpy
-from bpy.props import StringProperty, BoolProperty
+from bpy.props import StringProperty, BoolProperty, FloatProperty
 
 from . import ndm_parser
 
@@ -45,7 +45,7 @@ class ImportNDM(bpy.types.Operator):
         default=True,
     )
 
-    scale_factor: bpy.props.FloatProperty(
+    scale_factor: FloatProperty(
         name="Scale",
         description="Scale factor for imported model",
         default=0.01,
