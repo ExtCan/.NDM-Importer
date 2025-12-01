@@ -370,8 +370,12 @@ def parse_single_node(data: bytes, node_offset: int,
 def find_display_list_start(data: bytes, start: int, end: int, num_vertices: int) -> int:
     """Find the start of valid GX display list data."""
     use_16bit = num_vertices > 255
+    bytes_per_index = 2 if use_16bit else 1
     
-    for offset in range(start, min(end, len(data) - 5)):
+    # Need at least: cmd (1) + count (2) + 3 indices
+    min_size = 3 + 3 * bytes_per_index
+    
+    for offset in range(start, min(end, len(data) - min_size)):
         if data[offset] in [0x80, 0x90, 0x98]:
             count = read_uint16_be(data, offset + 1)
             
@@ -382,16 +386,17 @@ def find_display_list_start(data: bytes, start: int, end: int, num_vertices: int
             # Check if first few indices are valid
             valid = True
             for i in range(min(3, count)):
+                idx_offset = offset + 3 + i * bytes_per_index
                 if use_16bit:
-                    if offset + 3 + i * 2 + 2 > len(data):
+                    if idx_offset + 2 > len(data):
                         valid = False
                         break
-                    idx = read_uint16_be(data, offset + 3 + i * 2)
+                    idx = read_uint16_be(data, idx_offset)
                 else:
-                    if offset + 3 + i >= len(data):
+                    if idx_offset >= len(data):
                         valid = False
                         break
-                    idx = data[offset + 3 + i]
+                    idx = data[idx_offset]
                 
                 if idx >= num_vertices:
                     valid = False
