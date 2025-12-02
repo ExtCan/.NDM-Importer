@@ -306,6 +306,7 @@ class NDMParser:
         - 4-byte: (pos:u8, 0, 0, uv:u8) - used in some files like TITLE.NDM
         
         The 4-byte format has bytes 1 and 2 always as 0.
+        Detection: Check if bytes at positions 1,2 (in 4-byte layout) are zeros.
         """
         # Find first valid draw command (skip header area)
         first_cmd = -1
@@ -328,21 +329,26 @@ class NDMParser:
         
         count = struct.unpack_from('>H', self.data, dl_offset + first_cmd + 1)[0]
         
-        # Check the pattern of bytes 1 and 2 (should be 0 for 4-byte format)
+        # Detection strategy: In 4-byte format, every 4th byte pattern has
+        # bytes 1 and 2 as 0x00. Check multiple vertex refs assuming 4-byte layout.
+        # If pattern holds consistently, use 4-byte format.
         zeros_in_b1b2 = 0
         checks = min(20, count)
+        valid_checks = 0
         
         for i in range(checks):
+            # Check at 4-byte intervals to test 4-byte format hypothesis
             ref_offset = dl_offset + first_cmd + 3 + i * 4
             if ref_offset + 4 > len(self.data):
                 break
+            valid_checks += 1
             b1 = self.data[ref_offset + 1]
             b2 = self.data[ref_offset + 2]
             if b1 == 0 and b2 == 0:
                 zeros_in_b1b2 += 1
         
-        # If most b1/b2 bytes are 0, it's 4-byte format
-        if zeros_in_b1b2 >= checks * 0.9:
+        # If most b1/b2 bytes are 0 at 4-byte intervals, it's 4-byte format
+        if valid_checks > 0 and zeros_in_b1b2 >= valid_checks * 0.9:
             return 4
         
         return 3
@@ -425,8 +431,8 @@ class NDMParser:
                     if idx < num_vertices:
                         valid_count += 1
                 
-                # Need at least 50% of checked indices to be valid
-                # (some indices may legitimately be 0 which is always valid)
+                # Need at least 25% of checked indices to be valid
+                # Low threshold because indices can legitimately be 0 or small values
                 if check_count > 0 and valid_count < check_count * 0.25:
                     offset += 1
                     continue
@@ -445,9 +451,10 @@ class NDMParser:
                     
                     if idx < num_vertices:
                         indices.append(idx)
-                    else:
-                        # Index out of range - use modulo to wrap
-                        indices.append(idx % num_vertices if num_vertices > 0 else 0)
+                    elif num_vertices > 0:
+                        # Index out of range - skip this vertex to avoid geometry errors
+                        # This can happen if format detection failed or data is corrupt
+                        continue
                 
                 # Advance offset past vertex data
                 offset += count * bytes_per_vertex
