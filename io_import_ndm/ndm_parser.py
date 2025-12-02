@@ -8,10 +8,10 @@ NDM File Format:
 ================
 
 Header (0x00-0x20, 32 bytes):
-- 0x00: Number of texture references (uint32 BE)
-- 0x04: End offset of texture section (uint32 BE)  
-- 0x08: Number of nodes (upper 8 bits) | flags
-- 0x0C: Flags (uint32 BE)
+- 0x00-0x03: Number of texture references (uint32 BE)
+- 0x04-0x07: End offset of texture section / node definitions start (uint32 BE)  
+- 0x08-0x09: Number of nodes (uint16 BE)
+- 0x0A-0x1F: Reserved/flags (22 bytes, typically zeros)
 
 Texture References (starting at 0x20, 16 bytes each):
 - Null-terminated texture name strings
@@ -21,22 +21,29 @@ Node Hierarchy (after textures, variable location):
 
 Node Definitions (128 bytes each):
 - 0x00-0x0F: Node name (16 bytes, null-terminated)
-- 0x10-0x1F: Position or additional data
-- 0x20-0x2B: Scale (3x float32 BE, typically 1.0 = 0x3f800000)
-- 0x2C-0x2F: Flags
-- 0x30-0x37: Vertex colors (2x RGBA)
-- 0x38-0x3F: Material/texture info (may contain 0xFFFFFFFF for no material)
-- 0x40-0x4F: Texture indices (4x uint16)
-- 0x50-0x53: Vertex data size
-- 0x54-0x57: Additional size (UV/display list header)
-- 0x58-0x5B: Face/display list data size  
+- 0x10-0x1B: Position (3x float32 BE)
+- 0x1C-0x1F: Unknown/padding
+- 0x20-0x27: Rotation? (8 bytes, often zeros)
+- 0x28-0x33: Scale (3x float32 BE, typically 1.0 = 0x3f800000)
+- 0x34-0x37: Flags
+- 0x38-0x3B: Color1 (RGBA)
+- 0x3C-0x3F: Color2 (RGBA)
+- 0x40-0x4F: Texture indices (4x uint16, 0xFFFF = no texture)
+- 0x50-0x53: Vertex data size (total bytes for positions + UVs + normals)
+- 0x54-0x57: Additional header size (padding before display list)
+- 0x58-0x5B: Display list size  
 - 0x5C-0x5F: Vertex counts
-- 0x60-0x7F: Additional mesh info and offsets
+- 0x60-0x7F: Additional mesh info
 
-For nodes with mesh data, the mesh data immediately follows the 128-byte header.
-Mesh data consists of:
-- Vertex positions: signed int16 triplets (x, y, z)
-- Display list: GameCube GX commands for rendering
+Display List Format:
+- Small models (<=255 vertices): 3 bytes per vertex ref (pos_idx:u8, attr:u8, uv_idx:u8)
+- Large models (>255 vertices): 6 bytes per vertex ref (pos_idx:u16, norm_idx:u16, uv_idx:u16)
+
+GX Draw Commands:
+- 0x80: Quads
+- 0x90: Triangles
+- 0x98: Triangle Strip
+- 0xA0: Triangle Fan
 """
 
 import struct
@@ -46,6 +53,9 @@ import math
 # Minimum ratio of valid indices required when parsing vertex references.
 # 80% allows for some padding or invalid data at the end of display lists.
 MIN_VALID_INDEX_RATIO = 0.8
+
+# Maximum vertex count per draw command (sanity check)
+MAX_DRAW_COMMAND_VERTICES = 20000
 
 # Blender imports - only available when running in Blender
 try:
@@ -294,20 +304,26 @@ class NDMParser:
         GameCube GX display lists contain setup commands followed by draw commands.
         Draw commands (0x80-0xBF) reference vertex indices.
         
-        This parser scans for valid draw commands by verifying that:
-        1. The command byte is in the draw command range (0x80-0xBF)
-        2. The count is reasonable (1-1000)
-        3. The vertex indices are valid (<num_vertices)
+        Vertex reference format depends on vertex count:
+        - Small models (<=255 vertices): 3 bytes per ref (pos:u8, attr:u8, uv:u8)
+        - Large models (>255 vertices): 6 bytes per ref (pos:u16, norm:u16, uv:u16)
         """
         if not node.has_mesh or node.display_list_size == 0:
             return []
             
-        # Display list starts after vertex data
+        # Display list immediately follows vertex data in the mesh data block.
+        # Some files have additional header data before draw commands, which
+        # the parser handles by scanning for valid draw commands.
         dl_offset = node.mesh_data_offset + node.vertex_data_size
         dl_end = dl_offset + node.display_list_size
         
         if dl_offset >= len(self.data):
             return []
+        
+        # Determine vertex reference format based on vertex count
+        # If >255 vertices, we need 16-bit indices
+        use_16bit = num_vertices > 255
+        bytes_per_vertex = 6 if use_16bit else 3
             
         faces = []
         offset = dl_offset
@@ -315,11 +331,7 @@ class NDMParser:
         while offset < dl_end and offset < len(self.data) - 3:
             cmd = self.data[offset]
             
-            # GX primitive draw commands are in range 0x80-0xBF
-            # 0x80 = quads, 0x90 = triangles, 0x98 = triangle strip
-            # 0xA0 = triangle fan, 0xA8 = lines, 0xB0 = line strip, 0xB8 = points
-            
-            # Only process 0x80 (quads) and 0x90 (triangles) as these are the most common
+            # Only process draw commands: 0x80 (quads), 0x90 (triangles), 0x98 (strip), 0xA0 (fan)
             if cmd in [0x80, 0x90, 0x98, 0xA0]:
                 if offset + 3 > len(self.data):
                     break
@@ -327,19 +339,27 @@ class NDMParser:
                 count = struct.unpack_from('>H', self.data, offset + 1)[0]
                 
                 # Sanity check count - must be reasonable for a draw command
-                if count == 0 or count > 1000:
+                if count == 0 or count > MAX_DRAW_COMMAND_VERTICES:
                     offset += 1
                     continue
                 
-                # Validate that vertex indices are mostly valid before processing
+                # Validate first few vertex indices
                 vert_start = offset + 3
                 valid_count = 0
-                check_count = min(8, count)
+                check_count = min(4, count)
+                
                 for i in range(check_count):
-                    if vert_start + i * 3 < len(self.data):
-                        idx = self.data[vert_start + i * 3]
-                        if idx < num_vertices:
-                            valid_count += 1
+                    idx_offset = vert_start + i * bytes_per_vertex
+                    if idx_offset + bytes_per_vertex > len(self.data):
+                        break
+                    
+                    if use_16bit:
+                        idx = struct.unpack_from('>H', self.data, idx_offset)[0]
+                    else:
+                        idx = self.data[idx_offset]
+                    
+                    if idx < num_vertices:
+                        valid_count += 1
                 
                 # Need at least 75% of checked indices to be valid
                 if valid_count < check_count * 0.75:
@@ -350,10 +370,24 @@ class NDMParser:
                 offset += 3  # Skip command header
                 
                 # Parse all vertex indices
-                indices = self._parse_vertex_indices(offset, count, num_vertices, dl_end)
+                indices = []
+                for i in range(count):
+                    idx_offset = offset + i * bytes_per_vertex
+                    if idx_offset + bytes_per_vertex > len(self.data):
+                        break
+                    
+                    if use_16bit:
+                        idx = struct.unpack_from('>H', self.data, idx_offset)[0]
+                    else:
+                        idx = self.data[idx_offset]
+                    
+                    if idx < num_vertices:
+                        indices.append(idx)
+                    else:
+                        # Stop on invalid index
+                        break
                 
                 # Advance offset past vertex data
-                bytes_per_vertex = 3  # Most common in NDM
                 offset += count * bytes_per_vertex
                 
                 if len(indices) >= 3:
@@ -394,42 +428,6 @@ class NDMParser:
                 offset += 1
         
         return faces
-    
-    def _parse_vertex_indices(self, offset, count, num_vertices, max_offset):
-        """Try to parse vertex indices from display list data"""
-        # Try different formats: 3 bytes, 4 bytes, 2 bytes per vertex
-        
-        for bytes_per_vertex in [3, 4, 2]:
-            indices = []
-            valid = True
-            
-            for j in range(count):
-                idx_offset = offset + j * bytes_per_vertex
-                if idx_offset >= min(len(self.data), max_offset):
-                    valid = False
-                    break
-                    
-                idx = self.data[idx_offset]
-                if idx < num_vertices:
-                    indices.append(idx)
-                else:
-                    valid = False
-                    break
-            
-            if valid and len(indices) >= count * MIN_VALID_INDEX_RATIO:
-                return indices
-        
-        # Fallback: just read single bytes and filter
-        indices = []
-        for j in range(min(count * 3, max_offset - offset)):
-            idx_offset = offset + j
-            if idx_offset >= len(self.data):
-                break
-            idx = self.data[idx_offset]
-            if idx < num_vertices:
-                indices.append(idx)
-        
-        return indices
 
 
 def import_ndm(context, filepath, import_textures=True, scale_factor=0.01):
