@@ -72,7 +72,8 @@ class NDMNode:
         self.texture_indices = []
         self.has_mesh = False
         self.mesh_data_offset = 0
-        self.vertex_data_size = 0
+        self.vertex_data_size = 0  # Total mesh data size (positions + UVs + etc)
+        self.position_data_size = 0  # Size of just the vertex positions
         self.display_list_size = 0
         self.vertex_count = 0
 
@@ -230,17 +231,22 @@ class NDMParser:
         node.texture_indices = [t for t in tex_data if t != 0xFFFF and t < len(self.textures)]
         
         # Parse mesh info at 0x50
-        # 0x50: vertex data size
-        # 0x54: additional data size (normals/UVs) - reserved for future UV import
+        # 0x50: total vertex attribute data size (positions + UVs + etc)
+        # 0x54: additional data size 
         # 0x58: display list size
         node.vertex_data_size = struct.unpack_from('>I', self.data, offset + 0x50)[0]
-        # additional_size at 0x54 contains UV/normal data size, not yet used
-        _ = struct.unpack_from('>I', self.data, offset + 0x54)[0]
         node.display_list_size = struct.unpack_from('>I', self.data, offset + 0x58)[0]
         
-        # Vertex counts at 0x5C
-        vert_counts = struct.unpack_from('>2H', self.data, offset + 0x5C)
-        node.vertex_count = vert_counts[0]
+        # The actual position data size is at offset 0x74
+        # This is the byte size of just vertex positions (num_vertices * 6)
+        node.position_data_size = struct.unpack_from('>I', self.data, offset + 0x74)[0]
+        
+        # Calculate actual vertex count from position data size
+        if node.position_data_size > 0 and node.position_data_size % 6 == 0:
+            node.vertex_count = node.position_data_size // 6
+        else:
+            # Fallback: use total vertex data size 
+            node.vertex_count = node.vertex_data_size // 6
         
         # Check if this node has mesh data
         # Valid mesh nodes have reasonable vertex data sizes and counts
@@ -263,8 +269,12 @@ class NDMParser:
         vertices = []
         offset = node.mesh_data_offset
         
-        # Each vertex is 6 bytes (3 x int16)
-        num_verts = node.vertex_data_size // 6
+        # Use position_data_size if available, otherwise fall back to vertex_data_size
+        if node.position_data_size > 0:
+            num_verts = node.position_data_size // 6
+        else:
+            num_verts = node.vertex_count if node.vertex_count > 0 else node.vertex_data_size // 6
+            
         if num_verts == 0 or num_verts > 100000:
             return []
             
@@ -283,7 +293,11 @@ class NDMParser:
         
         GameCube GX display lists contain setup commands followed by draw commands.
         Draw commands (0x80-0xBF) reference vertex indices.
-        The format varies - some files use 3 bytes per vertex, others use different formats.
+        
+        This parser scans for valid draw commands by verifying that:
+        1. The command byte is in the draw command range (0x80-0xBF)
+        2. The count is reasonable (1-1000)
+        3. The vertex indices are valid (<num_vertices)
         """
         if not node.has_mesh or node.display_list_size == 0:
             return []
@@ -301,39 +315,48 @@ class NDMParser:
         while offset < dl_end and offset < len(self.data) - 3:
             cmd = self.data[offset]
             
-            # Skip NOP (0x00)
-            if cmd == 0x00:
-                offset += 1
-                continue
-            
-            # GX primitive commands are in range 0x80-0xBF
+            # GX primitive draw commands are in range 0x80-0xBF
             # 0x80 = quads, 0x90 = triangles, 0x98 = triangle strip
             # 0xA0 = triangle fan, 0xA8 = lines, 0xB0 = line strip, 0xB8 = points
             
-            if (cmd & 0x80) and (cmd < 0xC0):
-                # This is a draw command
+            # Only process 0x80 (quads) and 0x90 (triangles) as these are the most common
+            if cmd in [0x80, 0x90, 0x98, 0xA0]:
                 if offset + 3 > len(self.data):
                     break
                     
                 count = struct.unpack_from('>H', self.data, offset + 1)[0]
                 
-                # Sanity check count
-                if count == 0 or count > 10000:
+                # Sanity check count - must be reasonable for a draw command
+                if count == 0 or count > 1000:
                     offset += 1
                     continue
                 
-                offset += 3
+                # Validate that vertex indices are mostly valid before processing
+                vert_start = offset + 3
+                valid_count = 0
+                check_count = min(8, count)
+                for i in range(check_count):
+                    if vert_start + i * 3 < len(self.data):
+                        idx = self.data[vert_start + i * 3]
+                        if idx < num_vertices:
+                            valid_count += 1
                 
-                # Determine bytes per vertex by testing with different formats
-                # and seeing which gives valid indices
+                # Need at least 75% of checked indices to be valid
+                if valid_count < check_count * 0.75:
+                    offset += 1
+                    continue
+                
+                # This is a valid draw command - process it
+                offset += 3  # Skip command header
+                
+                # Parse all vertex indices
                 indices = self._parse_vertex_indices(offset, count, num_vertices, dl_end)
                 
+                # Advance offset past vertex data
+                bytes_per_vertex = 3  # Most common in NDM
+                offset += count * bytes_per_vertex
+                
                 if len(indices) >= 3:
-                    # Advance offset past vertex data
-                    # Try to estimate bytes_per_vertex from what worked
-                    bytes_per_vertex = 3  # Most common in NDM
-                    offset += count * bytes_per_vertex
-                    
                     # Determine primitive type from command
                     prim_type = cmd & 0xF8  # Upper 5 bits
                     
@@ -366,11 +389,8 @@ class NDMParser:
                                 i0, i1, i2 = indices[0], indices[i], indices[i+1]
                                 if i0 != i1 and i1 != i2 and i0 != i2:
                                     faces.append((i0, i1, i2))
-                else:
-                    # Skip this command - couldn't parse vertices
-                    offset += count * 3  # Assume 3 bytes per vertex
             else:
-                # Not a draw command - skip one byte
+                # Not a draw command we recognize - skip one byte
                 offset += 1
         
         return faces
