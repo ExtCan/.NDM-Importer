@@ -5,22 +5,22 @@ Generated from analysis of ind-nddemo (Peach's Castle Demo) files
 
 | File | Textures | Nodes | Meshes | Vertices | Faces | Notes |
 |------|----------|-------|--------|----------|-------|-------|
-| ARROW.NDM | 4 | 751 | 751 | 151,962 | 300,920 | Direction arrows (many small meshes) |
-| BIPLANE.NDM | 29 | 57 | 49 | 4,142 | 3,567 | Mario's biplane |
-| COIN.NDM | 8 | 10 | 8 | 496 | 960 | Collectible coins |
+| ARROW.NDM | 4 | 768 | 768 | 151,962 | 300,920 | Direction arrows (many small meshes) |
+| BIPLANE.NDM | 29 | 57 | 57 | 4,142 | 4,611 | Mario's biplane |
+| COIN.NDM | 8 | 10 | 10 | 496 | 960 | Collectible coins |
 | KURIBO.NDM | 1 | 1 | 1 | 4,221 | 8,254 | Goomba enemy (uses 16-bit indices) |
-| STG_CAVE.NDM | 57 | 57 | 48 | 21,010 | 4,943 | Cave area |
-| STG_CINE.NDM | 47 | 53 | 51 | 9,171 | 3,055 | Cinema room |
+| STG_CAVE.NDM | 57 | 58 | 58 | 21,010 | 5,045 | Cave area |
+| STG_CINE.NDM | 47 | 69 | 69 | 9,171 | 3,505 | Cinema room |
 | STG_COIN.NDM | 5 | 1 | 1 | 60 | 116 | Coin stage element |
-| STG_DOME.NDM | 21 | 22 | 19 | 9,466 | 5,628 | Dome room |
-| STG_ENTR.NDM | 64 | 201 | 196 | 34,877 | 15,207 | Castle entrance (large) |
-| STG_ENVE.NDM | 21 | 28 | 26 | 3,249 | 1,232 | Envelope/letter? |
-| STG_HANG.NDM | 36 | 46 | 44 | 18,374 | 6,649 | Hanging area |
-| STG_MPOL.NDM | 4 | 8 | 6 | 414 | 135 | Pole stage |
-| STG_OPEN.NDM | 8 | 13 | 12 | 694 | 807 | Opening area |
-| STG_SPIL.NDM | 74 | 78 | 76 | 17,737 | 26,543 | Spillway area |
-| TITLE.NDM | 1 | 1 | 1 | 15 | 0 | Title screen |
-| TOUEI.NDM | 78 | 79 | 78 | 702 | 0 | Logo/projection |
+| STG_DOME.NDM | 21 | 23 | 23 | 9,466 | 5,760 | Dome room |
+| STG_ENTR.NDM | 64 | 222 | 222 | 34,877 | 16,864 | Castle entrance (large) |
+| STG_ENVE.NDM | 21 | 31 | 31 | 3,249 | 1,541 | Envelope/letter? |
+| STG_HANG.NDM | 36 | 60 | 60 | 18,374 | 7,171 | Hanging area |
+| STG_MPOL.NDM | 4 | 8 | 8 | 414 | 135 | Pole stage |
+| STG_OPEN.NDM | 8 | 15 | 15 | 694 | 931 | Opening area |
+| STG_SPIL.NDM | 74 | 111 | 111 | 17,737 | 27,067 | Spillway area |
+| TITLE.NDM | 1 | 1 | 1 | 15 | 16 | Title screen |
+| TOUEI.NDM | 78 | 79 | 79 | 702 | 624 | Logo/projection |
 
 ## Format Details
 
@@ -53,9 +53,9 @@ Generated from analysis of ind-nddemo (Peach's Castle Demo) files
 | 0x40 | 8 | Texture indices (4x uint16, 0xFFFF=none) |
 | 0x48 | 8 | More texture/material info |
 | 0x50 | 4 | Vertex data size (total: positions + UVs + normals) |
-| 0x54 | 4 | Additional header size |
+| 0x54 | 4 | Display list header offset (draw commands start at this - 0x20) |
 | 0x58 | 4 | Display list size |
-| 0x5C | 4 | Vertex counts |
+| 0x5C | 4 | Vertex counts/flags |
 | 0x60 | 32 | Additional mesh offsets |
 | 0x74 | 4 | Position data size (just vertex positions) |
 
@@ -67,7 +67,11 @@ Generated from analysis of ind-nddemo (Peach's Castle Demo) files
 
 ### Display List
 - Follows vertex data
-- Contains GX draw commands and vertex references
+- May contain GX setup commands (0x61, 0x68, 0x72, etc.) before draw commands
+- The field at node offset 0x54 indicates where draw commands start:
+  - `0x20`: Draw commands start immediately
+  - `0x40`: 32 bytes of GX setup before draw commands
+  - `0xA0`: 128 bytes of GX setup before draw commands
 
 #### Draw Commands
 | Command | Type |
@@ -80,19 +84,30 @@ Generated from analysis of ind-nddemo (Peach's Castle Demo) files
 Command format: `[cmd:u8] [count:u16BE] [vertex_refs...]`
 
 #### Vertex Reference Format
-The format depends on vertex count:
+The format depends on vertex count and file type:
 
-**Small models (≤255 vertices)**: 3 bytes per ref
+**3-byte format** (most small meshes): 
 - Byte 0: Position index (uint8)
-- Byte 1: Attribute (uint8, often matches position or is 0)
+- Byte 1: Attribute/Normal index (uint8, often 0)
 - Byte 2: UV index (uint8)
+- Files: COIN, BIPLANE, ARROW
 
-**Large models (>255 vertices)**: 6 bytes per ref
+**4-byte format** (some stage files):
+- Byte 0: Position index (uint8)
+- Byte 1: Normal index (uint8, often 0)
+- Byte 2: Color index (uint8, often 0)
+- Byte 3: UV index (uint8)
+- Files: TITLE, TOUEI, STG_ENTR, STG_DOME, STG_SPIL
+
+**6-byte format** (large models with >255 vertices):
 - Bytes 0-1: Position index (uint16 BE)
 - Bytes 2-3: Normal index (uint16 BE)  
 - Bytes 4-5: UV index (uint16 BE)
+- Files: KURIBO
 
-Note: In many cases, all three indices are the same value.
+**Format Detection**: The parser detects 4-byte format when bytes 1 and 2 of 
+each reference are both 0 for most vertices, indicating the norm:0, color:0 pattern.
+Otherwise, it uses 3-byte format. 6-byte format is used when vertex count exceeds 255.
 
 ## Model Categories
 

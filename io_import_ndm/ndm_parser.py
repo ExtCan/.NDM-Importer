@@ -57,6 +57,17 @@ MIN_VALID_INDEX_RATIO = 0.8
 # Maximum vertex count per draw command (sanity check)
 MAX_DRAW_COMMAND_VERTICES = 20000
 
+# Display list header constants
+DL_HEADER_BASE_OFFSET = 0x20  # Base offset that indicates no GX setup commands
+MAX_DL_HEADER_SIZE = 0x1000  # Maximum valid display list header size
+
+# Format detection constants  
+MAX_HEADER_SCAN_BYTES = 200  # Maximum bytes to scan for first draw command
+MIN_DRAW_COUNT = 4  # Minimum vertex count for valid draw command
+MAX_DRAW_COUNT = 2000  # Maximum vertex count for format detection sampling
+SAMPLE_REFS_COUNT = 6  # Number of vertex references to sample for format detection
+MIN_BOTH_ZERO_4BYTE = 5  # Minimum refs with bytes 1,2 both zero to detect 4-byte format
+
 # Blender imports - only available when running in Blender
 try:
     import bpy
@@ -85,6 +96,7 @@ class NDMNode:
         self.vertex_data_size = 0  # Total mesh data size (positions + UVs + etc)
         self.position_data_size = 0  # Size of just the vertex positions
         self.display_list_size = 0
+        self.dl_header_size = 0  # Bytes of GX setup commands before draw commands
         self.vertex_count = 0
 
 
@@ -242,10 +254,19 @@ class NDMParser:
         
         # Parse mesh info at 0x50
         # 0x50: total vertex attribute data size (positions + UVs + etc)
-        # 0x54: additional data size 
+        # 0x54: display list header size (GX setup commands before draw commands)
         # 0x58: display list size
         node.vertex_data_size = struct.unpack_from('>I', self.data, offset + 0x50)[0]
+        dl_header_field = struct.unpack_from('>I', self.data, offset + 0x54)[0]
         node.display_list_size = struct.unpack_from('>I', self.data, offset + 0x58)[0]
+        
+        # The dl_header_field indicates where to start looking for draw commands
+        # Draw commands start at (dl_header_field - DL_HEADER_BASE_OFFSET) bytes into the display list
+        # When dl_header_field equals DL_HEADER_BASE_OFFSET, draw commands start immediately
+        if dl_header_field >= DL_HEADER_BASE_OFFSET and dl_header_field < MAX_DL_HEADER_SIZE:
+            node.dl_header_size = dl_header_field - DL_HEADER_BASE_OFFSET
+        else:
+            node.dl_header_size = 0
         
         # The actual position data size is at offset 0x74
         # This is the byte size of just vertex positions (num_vertices * 6)
@@ -298,32 +319,104 @@ class NDMParser:
             
         return vertices
         
+    def _detect_vertex_ref_format(self, dl_offset, dl_end, num_vertices):
+        """Detect vertex reference format (3-byte or 4-byte) from display list data.
+        
+        Returns bytes_per_vertex (3, 4, or 6 for 16-bit indices).
+        
+        Format detection strategies:
+        - 6-byte: Used when >255 vertices (16-bit indices required)
+        - 4-byte: pos:u8, norm:u8, color:u8, uv:u8 
+          - Both bytes 1 AND 2 are often 0 for all refs
+          - Or positions at 4-byte intervals are sequential (0,1,2,3...)
+        - 3-byte: pos:u8, attr:u8, uv:u8
+          - Byte 1 is often 0 (attr=0 or same as pos)
+          - Positions at 3-byte intervals are valid and varied
+        """
+        if num_vertices > 255:
+            return 6  # Must use 16-bit indices
+        
+        # Find first draw command
+        offset = dl_offset
+        while offset < min(dl_end, dl_offset + MAX_HEADER_SCAN_BYTES) and offset < len(self.data) - 3:
+            cmd = self.data[offset]
+            if cmd == 0x80 and offset + 30 < len(self.data):
+                count = struct.unpack_from('>H', self.data, offset + 1)[0]
+                if MIN_DRAW_COUNT <= count <= MAX_DRAW_COUNT:
+                    # Read first 24 bytes of vertex refs
+                    refs = self.data[offset + 3:offset + 3 + 24]
+                    
+                    # Strategy 1: Check if bytes 1,2 in 4-byte groups are both 0
+                    both_zero_4byte = sum(1 for j in range(SAMPLE_REFS_COUNT) if j*4+2 < len(refs) and 
+                                         refs[j*4+1] == 0 and refs[j*4+2] == 0)
+                    
+                    if both_zero_4byte >= MIN_BOTH_ZERO_4BYTE:
+                        return 4  # Clearly 4-byte format
+                    
+                    # Strategy 2: Check if 4-byte positions form a sequential quad
+                    pos_4byte = [refs[j * 4] for j in range(min(4, len(refs) // 4))]
+                    is_sequential_quad_4byte = (
+                        len(pos_4byte) >= 4 and
+                        all(p < num_vertices for p in pos_4byte) and
+                        (pos_4byte == [0, 1, 2, 3] or 
+                         pos_4byte == [pos_4byte[0], pos_4byte[0]+1, pos_4byte[0]+2, pos_4byte[0]+3])
+                    )
+                    
+                    pos_3byte = [refs[j * 3] for j in range(min(4, len(refs) // 3))]
+                    is_sequential_quad_3byte = (
+                        len(pos_3byte) >= 4 and
+                        all(p < num_vertices for p in pos_3byte) and
+                        (pos_3byte == [0, 1, 2, 3] or 
+                         pos_3byte == [pos_3byte[0], pos_3byte[0]+1, pos_3byte[0]+2, pos_3byte[0]+3])
+                    )
+                    
+                    # If 4-byte gives sequential and 3-byte doesn't, use 4-byte
+                    if is_sequential_quad_4byte and not is_sequential_quad_3byte:
+                        return 4
+                    
+                    # If 3-byte gives sequential and 4-byte doesn't, use 3-byte
+                    if is_sequential_quad_3byte and not is_sequential_quad_4byte:
+                        return 3
+                    
+                    # If both or neither are sequential, check byte patterns
+                    # In 3-byte format, byte 1 is often 0
+                    zeros_3byte = sum(1 for j in range(8) if j*3+1 < len(refs) and refs[j*3+1] == 0)
+                    
+                    if zeros_3byte >= 6:
+                        return 3  # High zero count in 3-byte format
+                    
+                    # Default to 3-byte
+                    return 3
+            offset += 1
+        
+        return 3  # Default
+    
     def get_mesh_faces(self, node, num_vertices):
         """Extract face indices from a node's display list
         
         GameCube GX display lists contain setup commands followed by draw commands.
         Draw commands (0x80-0xBF) reference vertex indices.
         
-        Vertex reference format depends on vertex count:
-        - Small models (<=255 vertices): 3 bytes per ref (pos:u8, attr:u8, uv:u8)
-        - Large models (>255 vertices): 6 bytes per ref (pos:u16, norm:u16, uv:u16)
+        Vertex reference formats:
+        - 3 bytes: pos:u8, attr:u8, uv:u8 (most common for small meshes)
+        - 4 bytes: pos:u8, norm:u8, color:u8, uv:u8 (some files like TITLE, STG_*)
+        - 6 bytes: pos:u16, norm:u16, uv:u16 (when >255 vertices)
         """
         if not node.has_mesh or node.display_list_size == 0:
             return []
             
         # Display list immediately follows vertex data in the mesh data block.
-        # Some files have additional header data before draw commands, which
-        # the parser handles by scanning for valid draw commands.
-        dl_offset = node.mesh_data_offset + node.vertex_data_size
-        dl_end = dl_offset + node.display_list_size
+        # Skip past GX setup commands using dl_header_size.
+        dl_offset = node.mesh_data_offset + node.vertex_data_size + node.dl_header_size
+        dl_end = node.mesh_data_offset + node.vertex_data_size + node.display_list_size
         
         if dl_offset >= len(self.data):
             return []
         
-        # Determine vertex reference format based on vertex count
-        # If >255 vertices, we need 16-bit indices
-        use_16bit = num_vertices > 255
-        bytes_per_vertex = 6 if use_16bit else 3
+        # Detect vertex reference format (use full dl range for detection)
+        full_dl_offset = node.mesh_data_offset + node.vertex_data_size
+        bytes_per_vertex = self._detect_vertex_ref_format(full_dl_offset, dl_end, num_vertices)
+        use_16bit = bytes_per_vertex == 6
             
         faces = []
         offset = dl_offset
