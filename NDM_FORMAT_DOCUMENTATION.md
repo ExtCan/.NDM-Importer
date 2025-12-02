@@ -5,22 +5,22 @@ Generated from analysis of ind-nddemo (Peach's Castle Demo) files
 
 | File | Textures | Nodes | Meshes | Vertices | Faces | Notes |
 |------|----------|-------|--------|----------|-------|-------|
-| ARROW.NDM | 4 | 751 | 751 | 151,962 | 300,920 | Direction arrows (many small meshes) |
-| BIPLANE.NDM | 29 | 57 | 49 | 4,142 | 3,567 | Mario's biplane |
+| ARROW.NDM | 4 | 768 | 768 | 151,962 | 300,920 | Direction arrows (many small meshes) |
+| BIPLANE.NDM | 29 | 57 | 49 | 4,142 | 4,800 | Mario's biplane |
 | COIN.NDM | 8 | 10 | 8 | 496 | 960 | Collectible coins |
-| KURIBO.NDM | 1 | 1 | 1 | 4,221 | 8,254 | Goomba enemy (uses 16-bit indices) |
-| STG_CAVE.NDM | 57 | 57 | 48 | 21,010 | 4,943 | Cave area |
-| STG_CINE.NDM | 47 | 53 | 51 | 9,171 | 3,055 | Cinema room |
-| STG_COIN.NDM | 5 | 1 | 1 | 60 | 116 | Coin stage element |
-| STG_DOME.NDM | 21 | 22 | 19 | 9,466 | 5,628 | Dome room |
-| STG_ENTR.NDM | 64 | 201 | 196 | 34,877 | 15,207 | Castle entrance (large) |
-| STG_ENVE.NDM | 21 | 28 | 26 | 3,249 | 1,232 | Envelope/letter? |
-| STG_HANG.NDM | 36 | 46 | 44 | 18,374 | 6,649 | Hanging area |
-| STG_MPOL.NDM | 4 | 8 | 6 | 414 | 135 | Pole stage |
-| STG_OPEN.NDM | 8 | 13 | 12 | 694 | 807 | Opening area |
-| STG_SPIL.NDM | 74 | 78 | 76 | 17,737 | 26,543 | Spillway area |
-| TITLE.NDM | 1 | 1 | 1 | 15 | 0 | Title screen |
-| TOUEI.NDM | 78 | 79 | 78 | 702 | 0 | Logo/projection |
+| KURIBO.NDM | 1 | 1 | 1 | 4,221 | 16,969 | Goomba enemy |
+| STG_CAVE.NDM | 57 | 58 | 48 | 21,010 | 40,424 | Cave area |
+| STG_CINE.NDM | 47 | 69 | 51 | 9,171 | 14,743 | Cinema room |
+| STG_COIN.NDM | 1 | 1 | 1 | 60 | 116 | Coin stage element |
+| STG_DOME.NDM | 21 | 23 | 19 | 9,466 | 17,400 | Dome room |
+| STG_ENTR.NDM | 38 | 222 | 192 | 34,877 | 64,486 | Castle entrance (largest) |
+| STG_ENVE.NDM | 21 | 31 | 26 | 3,249 | 12,581 | Envelope room |
+| STG_HANG.NDM | 36 | 60 | 44 | 18,374 | 29,362 | Hanging area |
+| STG_MPOL.NDM | 4 | 8 | 6 | 414 | 553 | Pole stage |
+| STG_OPEN.NDM | 8 | 15 | 12 | 694 | 893 | Opening area |
+| STG_SPIL.NDM | 74 | 111 | 76 | 17,737 | 45,220 | Spillway area |
+| TITLE.NDM | 1 | 1 | 1 | 15 | 16 | Title screen grid |
+| TOUEI.NDM | 78 | 79 | 78 | 702 | 624 | Logo/projection |
 
 ## Format Details
 
@@ -67,6 +67,7 @@ Generated from analysis of ind-nddemo (Peach's Castle Demo) files
 
 ### Display List
 - Follows vertex data
+- May have header/setup bytes before draw commands (typically 0x20-0x40 bytes)
 - Contains GX draw commands and vertex references
 
 #### Draw Commands
@@ -80,56 +81,59 @@ Generated from analysis of ind-nddemo (Peach's Castle Demo) files
 Command format: `[cmd:u8] [count:u16BE] [vertex_refs...]`
 
 #### Vertex Reference Format
-The format depends on vertex count:
+Two formats are used based on file structure:
 
-**Small models (≤255 vertices)**: 3 bytes per ref
+**3-byte format** (most files): 
 - Byte 0: Position index (uint8)
-- Byte 1: Attribute (uint8, often matches position or is 0)
+- Byte 1: Attribute/normal index (uint8)
 - Byte 2: UV index (uint8)
 
-**Large models (>255 vertices)**: 6 bytes per ref
-- Bytes 0-1: Position index (uint16 BE)
-- Bytes 2-3: Normal index (uint16 BE)  
-- Bytes 4-5: UV index (uint16 BE)
+**4-byte format** (some files like TITLE.NDM):
+- Byte 0: Position index (uint8)
+- Byte 1: 0x00 (padding)
+- Byte 2: 0x00 (padding)
+- Byte 3: UV index (uint8)
 
-Note: In many cases, all three indices are the same value.
+Detection: If bytes 1 and 2 are consistently 0x00 across vertex refs, the 4-byte format is used.
+
+Note: All indices are 8-bit (0-255). Models with >256 vertices use multiple draw commands, each addressing a subset of vertices.
 
 ## Model Categories
 
 ### Character Models
 - **KURIBO.NDM**: Goomba enemy
   - Single mesh with 4,221 vertices
-  - Uses 16-bit indices due to vertex count
-  - 8,254 triangles
+  - Multiple draw commands to handle >256 vertex limit
+  - 16,969 triangles
 
 ### Vehicle Models
 - **BIPLANE.NDM**: Mario's biplane
   - 49 meshes for parts (body, wings, tires, etc.)
-  - 4,142 total vertices
+  - 4,142 total vertices, 4,800 faces
 
 ### Environment/Stage Models
 - **STG_ENTR.NDM**: Castle entrance (largest stage file)
-  - 196 meshes, 34,877 vertices
-- **STG_CAVE.NDM**: Cave area
-  - 48 meshes, 21,010 vertices
-- **STG_HANG.NDM**: Hanging area
-  - 44 meshes, 18,374 vertices
+  - 192 meshes, 34,877 vertices, 64,486 faces
 - **STG_SPIL.NDM**: Spillway area
-  - 76 meshes, 17,737 vertices
+  - 76 meshes, 17,737 vertices, 45,220 faces
+- **STG_CAVE.NDM**: Cave area
+  - 48 meshes, 21,010 vertices, 40,424 faces
+- **STG_HANG.NDM**: Hanging area
+  - 44 meshes, 18,374 vertices, 29,362 faces
 
 ### UI/Effects
-- **ARROW.NDM**: Direction arrows (many small meshes)
+- **ARROW.NDM**: Direction arrows (768 small meshes, 300K+ faces)
 - **COIN.NDM**: Collectible coins (8 identical coins)
-- **TITLE.NDM**: Title screen element
-- **TOUEI.NDM**: Logo/projection
+- **TITLE.NDM**: Title screen grid (4-byte vertex format)
+- **TOUEI.NDM**: Logo/projection (78 meshes)
 
 ## Key Findings
 
-1. **Index Format Detection**: Models with >255 vertices use 6-byte vertex references (16-bit indices), while smaller models use 3-byte references (8-bit indices).
+1. **Index Format Detection**: All models use 8-bit vertex indices. The difference is in the number of bytes per vertex reference (3 or 4). Format is auto-detected by checking if bytes 1-2 are always zero.
 
 2. **Position Data Size**: The field at offset 0x74 in the node header contains the actual position data size, which is more reliable than the general vertex data size at 0x50.
 
-3. **Display List Structure**: Some display lists (especially for larger models) have setup/header data before the actual draw commands. The parser scans for valid 0x80/0x90/0x98/0xA0 commands.
+3. **Display List Header**: Many display lists have setup commands (GX Load BP/CP/XF) before draw commands. The parser skips the first ~0x20-0x40 bytes when searching for 0x80/0x90 draw commands.
 
 4. **Quad to Triangle Conversion**: GX uses quads (0x80 command) extensively. These are converted to triangles for Blender import: quad [v0,v1,v2,v3] → triangles [v0,v1,v2] + [v0,v2,v3].
 

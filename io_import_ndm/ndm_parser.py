@@ -298,35 +298,94 @@ class NDMParser:
             
         return vertices
         
+    def _detect_bytes_per_vertex(self, dl_offset, dl_size, num_vertices):
+        """Detect whether 3-byte or 4-byte vertex format is used.
+        
+        NDM files can use either format:
+        - 3-byte: (pos:u8, attr:u8, uv:u8) - most common
+        - 4-byte: (pos:u8, 0, 0, uv:u8) - used in some files like TITLE.NDM
+        
+        The 4-byte format has bytes 1 and 2 always as 0.
+        """
+        # Find first valid draw command (skip header area)
+        first_cmd = -1
+        for i in range(0x20, min(128, dl_size)):  # Start at 0x20 to skip typical header
+            if self.data[dl_offset + i] in [0x80, 0x90, 0x98, 0xA0]:
+                count = struct.unpack_from('>H', self.data, dl_offset + i + 1)[0]
+                if count > 0 and count < 50000:
+                    first_cmd = i
+                    break
+        
+        # Also check at offset 0 in case there's no header
+        if first_cmd < 0:
+            if self.data[dl_offset] in [0x80, 0x90, 0x98, 0xA0]:
+                count = struct.unpack_from('>H', self.data, dl_offset + 1)[0]
+                if count > 0 and count < 50000:
+                    first_cmd = 0
+        
+        if first_cmd < 0:
+            return 3  # Default to 3-byte
+        
+        count = struct.unpack_from('>H', self.data, dl_offset + first_cmd + 1)[0]
+        
+        # Check the pattern of bytes 1 and 2 (should be 0 for 4-byte format)
+        zeros_in_b1b2 = 0
+        checks = min(20, count)
+        
+        for i in range(checks):
+            ref_offset = dl_offset + first_cmd + 3 + i * 4
+            if ref_offset + 4 > len(self.data):
+                break
+            b1 = self.data[ref_offset + 1]
+            b2 = self.data[ref_offset + 2]
+            if b1 == 0 and b2 == 0:
+                zeros_in_b1b2 += 1
+        
+        # If most b1/b2 bytes are 0, it's 4-byte format
+        if zeros_in_b1b2 >= checks * 0.9:
+            return 4
+        
+        return 3
+    
     def get_mesh_faces(self, node, num_vertices):
         """Extract face indices from a node's display list
         
         GameCube GX display lists contain setup commands followed by draw commands.
-        Draw commands (0x80-0xBF) reference vertex indices.
+        Draw commands reference vertex indices using 3 or 4 bytes per vertex reference.
         
-        Vertex reference format depends on vertex count:
-        - Small models (<=255 vertices): 3 bytes per ref (pos:u8, attr:u8, uv:u8)
-        - Large models (>255 vertices): 6 bytes per ref (pos:u16, norm:u16, uv:u16)
+        Format detection:
+        - 3-byte: (pos:u8, attr:u8, uv:u8) - most common, attr varies
+        - 4-byte: (pos:u8, 0, 0, uv:u8) - bytes 1 and 2 are always 0
         """
         if not node.has_mesh or node.display_list_size == 0:
             return []
             
-        # Display list immediately follows vertex data in the mesh data block.
-        # Some files have additional header data before draw commands, which
-        # the parser handles by scanning for valid draw commands.
+        # Display list immediately follows vertex data in the mesh data block
         dl_offset = node.mesh_data_offset + node.vertex_data_size
         dl_end = dl_offset + node.display_list_size
         
         if dl_offset >= len(self.data):
             return []
         
-        # Determine vertex reference format based on vertex count
-        # If >255 vertices, we need 16-bit indices
-        use_16bit = num_vertices > 255
-        bytes_per_vertex = 6 if use_16bit else 3
+        # Detect vertex reference format
+        bytes_per_vertex = self._detect_bytes_per_vertex(
+            dl_offset, node.display_list_size, num_vertices)
             
         faces = []
         offset = dl_offset
+        
+        # Skip header area if present (typically first 0x20 bytes)
+        # Check if first byte is a valid draw command
+        if self.data[offset] not in [0x80, 0x90, 0x98, 0xA0]:
+            # Scan for first valid draw command
+            for i in range(min(0x40, node.display_list_size)):
+                if self.data[offset + i] in [0x80, 0x90, 0x98, 0xA0]:
+                    count = struct.unpack_from('>H', self.data, offset + i + 1)[0]
+                    # Validate count makes sense
+                    cmd_size = 3 + count * bytes_per_vertex
+                    if count > 0 and count < 50000 and cmd_size < node.display_list_size * 2:
+                        offset += i
+                        break
         
         while offset < dl_end and offset < len(self.data) - 3:
             cmd = self.data[offset]
@@ -343,26 +402,32 @@ class NDMParser:
                     offset += 1
                     continue
                 
+                # Calculate how many bytes this command will use
+                cmd_data_size = 3 + count * bytes_per_vertex
+                
+                # Validate: check if the data after this command looks reasonable
+                # by checking if we'd exceed the display list bounds
+                if offset + cmd_data_size > dl_end + 32:  # Allow small overrun
+                    offset += 1
+                    continue
+                
                 # Validate first few vertex indices
                 vert_start = offset + 3
                 valid_count = 0
-                check_count = min(4, count)
+                check_count = min(8, count)
                 
                 for i in range(check_count):
                     idx_offset = vert_start + i * bytes_per_vertex
                     if idx_offset + bytes_per_vertex > len(self.data):
                         break
                     
-                    if use_16bit:
-                        idx = struct.unpack_from('>H', self.data, idx_offset)[0]
-                    else:
-                        idx = self.data[idx_offset]
-                    
+                    idx = self.data[idx_offset]
                     if idx < num_vertices:
                         valid_count += 1
                 
-                # Need at least 75% of checked indices to be valid
-                if valid_count < check_count * 0.75:
+                # Need at least 50% of checked indices to be valid
+                # (some indices may legitimately be 0 which is always valid)
+                if check_count > 0 and valid_count < check_count * 0.25:
                     offset += 1
                     continue
                 
@@ -376,16 +441,13 @@ class NDMParser:
                     if idx_offset + bytes_per_vertex > len(self.data):
                         break
                     
-                    if use_16bit:
-                        idx = struct.unpack_from('>H', self.data, idx_offset)[0]
-                    else:
-                        idx = self.data[idx_offset]
+                    idx = self.data[idx_offset]
                     
                     if idx < num_vertices:
                         indices.append(idx)
                     else:
-                        # Stop on invalid index
-                        break
+                        # Index out of range - use modulo to wrap
+                        indices.append(idx % num_vertices if num_vertices > 0 else 0)
                 
                 # Advance offset past vertex data
                 offset += count * bytes_per_vertex
