@@ -318,6 +318,41 @@ class NDMParser:
             vertices.append((x / 256.0, y / 256.0, z / 256.0))
             
         return vertices
+    
+    def get_mesh_uvs(self, node):
+        """Extract UV coordinates from a node's mesh data.
+        
+        UV data follows position data in the vertex_data section.
+        Format: signed int16 pairs (u, v), scaled by 1/256.0
+        """
+        if not node.has_mesh or node.mesh_data_offset == 0:
+            return []
+        
+        # Calculate offset to UV data (after positions)
+        uv_offset = node.mesh_data_offset + node.position_data_size
+        
+        # Calculate remaining vertex data size
+        remaining_data = node.vertex_data_size - node.position_data_size
+        
+        # UV data is likely 4 bytes per UV (2x int16)
+        if remaining_data <= 0 or remaining_data % 4 != 0:
+            return []
+        
+        num_uvs = remaining_data // 4
+        
+        if num_uvs == 0 or num_uvs > 100000:
+            return []
+        
+        uvs = []
+        for i in range(num_uvs):
+            uv_data_offset = uv_offset + i * 4
+            if uv_data_offset + 4 > len(self.data):
+                break
+            u, v = struct.unpack_from('>2h', self.data, uv_data_offset)
+            # Values are likely in 1/256 units, normalized to 0-1 range
+            uvs.append((u / 256.0, v / 256.0))
+        
+        return uvs
         
     def _detect_vertex_ref_format(self, dl_offset, dl_end, num_vertices):
         """Detect vertex reference format (3-byte or 4-byte) from display list data.
@@ -521,6 +556,158 @@ class NDMParser:
                 offset += 1
         
         return faces
+    
+    def get_mesh_faces_and_uvs(self, node, num_vertices):
+        """Extract face indices and UV indices from a node's display list.
+        
+        Returns: (faces, uv_faces) where:
+        - faces: list of (v0, v1, v2) vertex index tuples
+        - uv_faces: list of (uv0, uv1, uv2) UV index tuples corresponding to faces
+        
+        Vertex reference formats:
+        - 3 bytes: pos:u8, attr:u8, uv:u8
+        - 4 bytes: pos:u8, norm:u8, color:u8, uv:u8  
+        - 6 bytes: pos:u16, norm:u16, uv:u16
+        """
+        if not node.has_mesh or node.display_list_size == 0:
+            return [], []
+            
+        # Display list immediately follows vertex data in the mesh data block.
+        # Skip past GX setup commands using dl_header_size.
+        dl_offset = node.mesh_data_offset + node.vertex_data_size + node.dl_header_size
+        dl_end = node.mesh_data_offset + node.vertex_data_size + node.display_list_size
+        
+        if dl_offset >= len(self.data):
+            return [], []
+        
+        # Detect vertex reference format
+        full_dl_offset = node.mesh_data_offset + node.vertex_data_size
+        bytes_per_vertex = self._detect_vertex_ref_format(full_dl_offset, dl_end, num_vertices)
+        use_16bit = bytes_per_vertex == 6
+        uv_byte_offset = bytes_per_vertex - 1 if bytes_per_vertex == 3 else (bytes_per_vertex - 1)
+        # For 3-byte: UV at byte 2 (index 2)
+        # For 4-byte: UV at byte 3 (index 3)
+        # For 6-byte: UV at bytes 4-5 (indices 4-5)
+            
+        faces = []
+        uv_faces = []
+        offset = dl_offset
+        
+        while offset < dl_end and offset < len(self.data) - 3:
+            cmd = self.data[offset]
+            
+            # Only process draw commands: 0x80 (quads), 0x90 (triangles), 0x98 (strip), 0xA0 (fan)
+            if cmd in [0x80, 0x90, 0x98, 0xA0]:
+                if offset + 3 > len(self.data):
+                    break
+                    
+                count = struct.unpack_from('>H', self.data, offset + 1)[0]
+                
+                # Sanity check count
+                if count == 0 or count > MAX_DRAW_COMMAND_VERTICES:
+                    offset += 1
+                    continue
+                
+                # Validate first few vertex indices
+                vert_start = offset + 3
+                valid_count = 0
+                check_count = min(4, count)
+                
+                for i in range(check_count):
+                    idx_offset = vert_start + i * bytes_per_vertex
+                    if idx_offset + bytes_per_vertex > len(self.data):
+                        break
+                    
+                    if use_16bit:
+                        idx = struct.unpack_from('>H', self.data, idx_offset)[0]
+                    else:
+                        idx = self.data[idx_offset]
+                    
+                    if idx < num_vertices:
+                        valid_count += 1
+                
+                # Need at least 75% of checked indices to be valid
+                if valid_count < check_count * 0.75:
+                    offset += 1
+                    continue
+                
+                # This is a valid draw command - process it
+                offset += 3  # Skip command header
+                
+                # Parse all vertex and UV indices
+                indices = []
+                uv_indices = []
+                for i in range(count):
+                    idx_offset = offset + i * bytes_per_vertex
+                    if idx_offset + bytes_per_vertex > len(self.data):
+                        break
+                    
+                    # Extract position index
+                    if use_16bit:
+                        pos_idx = struct.unpack_from('>H', self.data, idx_offset)[0]
+                        uv_idx = struct.unpack_from('>H', self.data, idx_offset + 4)[0]
+                    else:
+                        pos_idx = self.data[idx_offset]
+                        uv_idx = self.data[idx_offset + uv_byte_offset]
+                    
+                    if pos_idx < num_vertices:
+                        indices.append(pos_idx)
+                        uv_indices.append(uv_idx)
+                    else:
+                        # Stop on invalid index
+                        break
+                
+                # Advance offset past vertex data
+                offset += count * bytes_per_vertex
+                
+                if len(indices) >= 3:
+                    # Determine primitive type from command
+                    prim_type = cmd & 0xF8  # Upper 5 bits
+                    
+                    if prim_type == 0x80:  # Quads
+                        # Convert quads to triangles
+                        for i in range(0, len(indices) - 3, 4):
+                            i0, i1, i2, i3 = indices[i], indices[i+1], indices[i+2], indices[i+3]
+                            uv0, uv1, uv2, uv3 = uv_indices[i], uv_indices[i+1], uv_indices[i+2], uv_indices[i+3]
+                            if i0 != i1 and i1 != i2 and i2 != i3:
+                                faces.append((i0, i1, i2))
+                                faces.append((i0, i2, i3))
+                                uv_faces.append((uv0, uv1, uv2))
+                                uv_faces.append((uv0, uv2, uv3))
+                                
+                    elif prim_type == 0x90:  # Triangles
+                        for i in range(0, len(indices) - 2, 3):
+                            i0, i1, i2 = indices[i], indices[i+1], indices[i+2]
+                            uv0, uv1, uv2 = uv_indices[i], uv_indices[i+1], uv_indices[i+2]
+                            if i0 != i1 and i1 != i2 and i0 != i2:
+                                faces.append((i0, i1, i2))
+                                uv_faces.append((uv0, uv1, uv2))
+                                
+                    elif prim_type == 0x98:  # Triangle strip
+                        for i in range(len(indices) - 2):
+                            i0, i1, i2 = indices[i], indices[i+1], indices[i+2]
+                            uv0, uv1, uv2 = uv_indices[i], uv_indices[i+1], uv_indices[i+2]
+                            if i0 != i1 and i1 != i2 and i0 != i2:
+                                if i % 2 == 0:
+                                    faces.append((i0, i1, i2))
+                                    uv_faces.append((uv0, uv1, uv2))
+                                else:
+                                    faces.append((i1, i0, i2))
+                                    uv_faces.append((uv1, uv0, uv2))
+                                    
+                    elif prim_type == 0xA0:  # Triangle fan
+                        if len(indices) >= 3:
+                            for i in range(1, len(indices) - 1):
+                                i0, i1, i2 = indices[0], indices[i], indices[i+1]
+                                uv0, uv1, uv2 = uv_indices[0], uv_indices[i], uv_indices[i+1]
+                                if i0 != i1 and i1 != i2 and i0 != i2:
+                                    faces.append((i0, i1, i2))
+                                    uv_faces.append((uv0, uv1, uv2))
+            else:
+                # Not a draw command we recognize - skip one byte
+                offset += 1
+        
+        return faces, uv_faces
 
 
 def import_ndm(context, filepath, import_textures=True, scale_factor=0.01):
@@ -564,7 +751,11 @@ def import_ndm(context, filepath, import_textures=True, scale_factor=0.01):
                 print(f"Warning: Node '{node.name}' has no vertices")
                 continue
                 
-            faces = parser.get_mesh_faces(node, len(vertices))
+            # Get faces and UV indices
+            faces, uv_faces = parser.get_mesh_faces_and_uvs(node, len(vertices))
+            
+            # Get UV coordinates if available
+            uvs = parser.get_mesh_uvs(node)
             
             # Create mesh with unique name
             if node.name in used_names:
@@ -597,10 +788,40 @@ def import_ndm(context, filepath, import_textures=True, scale_factor=0.01):
             # Create object
             obj = bpy.data.objects.new(mesh_name, mesh)
             
-            # Apply node color as vertex color if possible
+            # Apply UV coordinates if available
+            if len(uvs) > 0 and len(uv_faces) > 0:
+                try:
+                    # Create UV layer
+                    uv_layer = mesh.uv_layers.new(name="UVMap")
+                    
+                    # Apply UVs per face loop
+                    for face_idx, face in enumerate(mesh.polygons):
+                        if face_idx < len(uv_faces):
+                            uv_indices = uv_faces[face_idx]
+                            for loop_idx, loop in enumerate(face.loop_indices):
+                                if loop_idx < len(uv_indices):
+                                    uv_idx = uv_indices[loop_idx]
+                                    if uv_idx < len(uvs):
+                                        uv_layer.data[loop].uv = uvs[uv_idx]
+                    
+                    print(f"Applied {len(uvs)} UVs to '{node.name}'")
+                except Exception as e:
+                    print(f"Warning: Error applying UVs to '{node.name}': {e}")
+            
+            # Apply vertex colors from node color
             if node.color1 != (1.0, 1.0, 1.0, 1.0):
-                # Could add vertex colors here in the future
-                pass
+                try:
+                    # Create vertex color layer
+                    color_layer = mesh.vertex_colors.new(name="Color")
+                    
+                    # Apply color to all vertices
+                    for poly in mesh.polygons:
+                        for loop_idx in poly.loop_indices:
+                            color_layer.data[loop_idx].color = node.color1
+                    
+                    print(f"Applied vertex color {node.color1} to '{node.name}'")
+                except Exception as e:
+                    print(f"Warning: Error applying vertex colors to '{node.name}': {e}")
             
             collection.objects.link(obj)
             created_objects[node.name] = obj

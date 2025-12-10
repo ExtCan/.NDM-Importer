@@ -34,10 +34,15 @@ NDM files contain:
 
 ## Limitations
 
-- Textures are not imported (only referenced by name)
-- Some display list formats may not be fully parsed
-- UV coordinates and vertex colors are not yet imported
+- Textures are not imported (only referenced by name, requires DTX file parsing)
 - Animations are not supported
+- Normal vectors are not yet extracted from display lists
+
+## Recent Improvements
+
+- ✅ UV coordinates are now imported and applied to meshes
+- ✅ Vertex colors from node colors are now applied to meshes
+- ✅ Improved display list parsing for better compatibility
 
 ## License
 
