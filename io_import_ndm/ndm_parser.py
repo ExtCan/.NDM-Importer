@@ -718,8 +718,8 @@ class NDMParser:
                         for i in range(0, len(indices) - 3, 4):
                             i0, i1, i2, i3 = indices[i], indices[i+1], indices[i+2], indices[i+3]
                             uv0, uv1, uv2, uv3 = uv_indices[i], uv_indices[i+1], uv_indices[i+2], uv_indices[i+3]
-                            # Check all vertices are unique for valid quad
-                            if i0 != i1 and i0 != i2 and i0 != i3 and i1 != i2 and i1 != i3 and i2 != i3:
+                            # Check all 4 vertices are unique
+                            if len(set([i0, i1, i2, i3])) == 4:
                                 faces.append((i0, i1, i2))
                                 faces.append((i0, i2, i3))
                                 uv_faces.append((uv0, uv1, uv2))
