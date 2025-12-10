@@ -488,9 +488,8 @@ class NDMParser:
         if dl_offset >= len(self.data):
             return []
         
-        # Detect vertex reference format (use full dl range for detection)
-        full_dl_offset = node.mesh_data_offset + node.vertex_data_size
-        bytes_per_vertex = self._detect_vertex_ref_format(full_dl_offset, dl_end, num_vertices)
+        # Detect vertex reference format (skip header to detect from actual draw commands)
+        bytes_per_vertex = self._detect_vertex_ref_format(dl_offset, dl_end, num_vertices)
         use_16bit = bytes_per_vertex == 6
             
         faces = []
