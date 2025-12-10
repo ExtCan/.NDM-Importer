@@ -34,10 +34,19 @@ NDM files contain:
 
 ## Recent Improvements
 
-- ✅ UV coordinates are now extracted from mesh data and applied to meshes
-  - Successfully applies UVs for many models
-  - Some models have incomplete UV data or use alternative storage (gracefully handled)
-- ✅ Vertex colors from node colors are now applied to meshes
+### Latest Fixes (v2)
+- ✅ **Fixed vertex colors** - Were green due to wrong offset (0x30/0x34 → 0x38/0x3C)
+- ✅ **Fixed format detection** - Don't assume 6-byte format just because vertex count > 255
+- ✅ **Dramatically improved geometry import** - Many models now import 2-10x more faces
+  - BIPLANE: 4,611 → 9,187 faces (2x)
+  - STG_CAVE: 5,045 → 49,706 faces (10x)
+  - KURIBO: 8,254 → 17,233 faces (2x)
+
+### Initial Implementation (v1)
+- ✅ UV coordinates extracted from mesh data and applied to meshes
+  - Successfully applies UVs for most models
+  - Some models have incomplete UV data or sentinel values (handled gracefully)
+- ✅ Vertex colors from node colors applied to meshes
 - ✅ Improved display list parsing for better compatibility
 
 ## Limitations

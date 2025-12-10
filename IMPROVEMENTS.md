@@ -4,7 +4,53 @@
 
 This document describes the improvements made to the NDM importer to enable "perfect" import of all models from the Nintendo GameCube ind-nddemo (Peach's Castle Demo).
 
-## Key Improvements
+## Critical Bugfixes (v2)
+
+### 1. Vertex Color Offset Bug ✅ FIXED
+
+**Problem**: All vertex colors appeared green instead of their actual values.
+
+**Root Cause**: Colors were being parsed from wrong offsets:
+- Reading from 0x30 (last float of scale vector) as Color1
+- Reading from 0x34 (flags field) as Color2
+- Should be reading from 0x38 (Color1) and 0x3C (Color2)
+
+**Fix**: Updated color parsing offsets from 0x30/0x34 to correct 0x38/0x3C according to NDM format specification.
+
+**Result**: Vertex colors now display correctly (grays, not greens).
+
+### 2. Format Detection Bug ✅ FIXED
+
+**Problem**: Many models had severely corrupted geometry with thousands of missing faces.
+
+**Root Cause**: Format detection incorrectly assumed:
+```python
+if num_vertices > 255:
+    return 6  # Wrong! Assumes 6-byte format
+```
+
+This is incorrect because:
+- Format depends on max *index used*, not total vertex count
+- A model with 456 vertices might only reference indices 0-200 (fits in 8-bit)
+- Using wrong byte stride (6 instead of 3) caused misaligned reads
+- Many faces were skipped or read incorrectly
+- UV indices were wrong (e.g., 1810 when only 468 UVs exist)
+
+**Fix**: 
+- Removed the vertex count assumption
+- Enhanced format detection to analyze actual display list indices
+- Detect 6-byte format only when indices > 250 are actually found
+
+**Results**:
+| Model | Before | After | Improvement |
+|-------|--------|-------|-------------|
+| BIPLANE.NDM | 4,611 faces | 9,187 faces | 2x |
+| KURIBO.NDM | 8,254 faces | 17,233 faces | 2x |
+| STG_CAVE.NDM | 5,045 faces | 49,706 faces | 10x |
+| STG_ENVE.NDM | 1,541 faces | 16,020 faces | 10x |
+| STG_CINE.NDM | 3,505 faces | 54,877 faces | 15x |
+
+## Key Improvements (v1)
 
 ### 1. UV Coordinate Support ✅
 
