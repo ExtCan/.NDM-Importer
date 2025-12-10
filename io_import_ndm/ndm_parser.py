@@ -239,12 +239,12 @@ class NDMParser:
         else:
             node.scale = (1.0, 1.0, 1.0)
         
-        # Parse flags at 0x2C
-        node.flags = struct.unpack_from('>I', self.data, offset + 0x2C)[0]
+        # Parse flags at 0x34
+        node.flags = struct.unpack_from('>I', self.data, offset + 0x34)[0]
         
-        # Parse colors at 0x30 and 0x34
-        c1 = struct.unpack_from('>4B', self.data, offset + 0x30)
-        c2 = struct.unpack_from('>4B', self.data, offset + 0x34)
+        # Parse colors at 0x38 and 0x3C
+        c1 = struct.unpack_from('>4B', self.data, offset + 0x38)
+        c2 = struct.unpack_from('>4B', self.data, offset + 0x3C)
         node.color1 = tuple(c / 255.0 for c in c1)
         node.color2 = tuple(c / 255.0 for c in c2)
         
@@ -361,16 +361,18 @@ class NDMParser:
         Returns bytes_per_vertex (3, 4, or 6 for 16-bit indices).
         
         Format detection strategies:
-        - 6-byte: Used when >255 vertices (16-bit indices required)
         - 4-byte: pos:u8, norm:u8, color:u8, uv:u8 
           - Both bytes 1 AND 2 are often 0 for all refs
           - Or positions at 4-byte intervals are sequential (0,1,2,3...)
         - 3-byte: pos:u8, attr:u8, uv:u8
           - Byte 1 is often 0 (attr=0 or same as pos)
           - Positions at 3-byte intervals are valid and varied
+        - 6-byte: pos:u16, norm:u16, uv:u16
+          - Used when vertex indices in display list exceed 255
+          - Note: vertex count > 255 doesn't guarantee 6-byte format
         """
-        if num_vertices > 255:
-            return 6  # Must use 16-bit indices
+        # Don't assume 6-byte format just because vertex count > 255
+        # The display list might only reference a subset with 8-bit indices
         
         # Find first draw command
         offset = dl_offset
@@ -421,8 +423,55 @@ class NDMParser:
                     if zeros_3byte >= 6:
                         return 3  # High zero count in 3-byte format
                     
+                    # Check if any position indices in 3-byte interpretation exceed 255
+                    # which would indicate we need 6-byte format
+                    if count >= 10:  # Need enough data to check
+                        # Try interpreting as 3-byte and check for >255 indices
+                        has_large_idx_3byte = False
+                        for j in range(min(count, 20)):
+                            if j * 3 < len(refs):
+                                pos_idx = refs[j * 3]
+                                if pos_idx > 255:
+                                    has_large_idx_3byte = True
+                                    break
+                        
+                        # Try interpreting as 6-byte and check if indices make sense
+                        has_valid_idx_6byte = True
+                        if len(refs) >= 12:  # At least 2 full 6-byte refs
+                            for j in range(min(count, 10)):
+                                if j * 6 + 1 < len(refs):
+                                    pos_idx = (refs[j * 6] << 8) | refs[j * 6 + 1]
+                                    # Check if this looks like a reasonable vertex index
+                                    if pos_idx > num_vertices or pos_idx > 10000:
+                                        has_valid_idx_6byte = False
+                                        break
+                        
+                        if has_large_idx_3byte and has_valid_idx_6byte:
+                            return 6
+                    
                     # Default to 3-byte
                     return 3
+            offset += 1
+        
+        # Final check: try to detect 6-byte by checking if any command has indices > 255
+        # Scan more of the display list
+        offset = dl_offset
+        while offset < min(dl_end, dl_offset + 1000) and offset < len(self.data) - 10:
+            cmd = self.data[offset]
+            if cmd in [0x80, 0x90, 0x98, 0xA0] and offset + 10 < len(self.data):
+                count = struct.unpack_from('>H', self.data, offset + 1)[0]
+                if 3 <= count <= MAX_DRAW_COUNT:
+                    refs_start = offset + 3
+                    # Check first few references as 3-byte
+                    needs_16bit = False
+                    for j in range(min(count, 5)):
+                        if refs_start + j * 3 < len(self.data):
+                            pos_idx = self.data[refs_start + j * 3]
+                            if pos_idx > 250:  # Likely needs 16-bit if seeing indices this high
+                                needs_16bit = True
+                                break
+                    if needs_16bit:
+                        return 6
             offset += 1
         
         return 3  # Default
