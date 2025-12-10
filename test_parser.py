@@ -62,19 +62,35 @@ def test_ndm_file(filepath):
                         print(f"    ⚠ Warning: Has vertices but no faces")
                     else:
                         # Check if all face indices are valid
-                        max_idx = max(max(f) for f in faces)
-                        if max_idx >= len(vertices):
-                            print(f"    ✗ Error: Face index {max_idx} >= vertex count {len(vertices)}")
-                        else:
-                            print(f"    ✓ All face indices valid")
+                        try:
+                            # Filter out empty faces
+                            valid_faces = [f for f in faces if len(f) >= 3]
+                            if valid_faces:
+                                max_idx = max(max(f) for f in valid_faces)
+                                if max_idx >= len(vertices):
+                                    print(f"    ✗ Error: Face index {max_idx} >= vertex count {len(vertices)}")
+                                else:
+                                    print(f"    ✓ All face indices valid")
+                            else:
+                                print(f"    ⚠ Warning: All faces are empty")
+                        except (ValueError, TypeError) as e:
+                            print(f"    ✗ Error validating faces: {e}")
                     
                     # Check UV data
                     if len(uvs) > 0 and len(uv_faces) > 0:
-                        max_uv_idx = max(max(f) for f in uv_faces)
-                        if max_uv_idx >= len(uvs):
-                            print(f"    ✗ Error: UV index {max_uv_idx} >= UV count {len(uvs)}")
-                        else:
-                            print(f"    ✓ All UV indices valid")
+                        try:
+                            # Filter out empty UV faces
+                            valid_uv_faces = [f for f in uv_faces if len(f) >= 3]
+                            if valid_uv_faces:
+                                max_uv_idx = max(max(f) for f in valid_uv_faces)
+                                if max_uv_idx >= len(uvs):
+                                    print(f"    ✗ Error: UV index {max_uv_idx} >= UV count {len(uvs)}")
+                                else:
+                                    print(f"    ✓ All UV indices valid")
+                            else:
+                                print(f"    ⚠ Warning: All UV faces are empty")
+                        except (ValueError, TypeError) as e:
+                            print(f"    ✗ Error validating UV indices: {e}")
                     elif len(faces) > 0:
                         print(f"    ⚠ Warning: Has faces but no UVs")
         

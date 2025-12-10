@@ -349,7 +349,8 @@ class NDMParser:
             if uv_data_offset + 4 > len(self.data):
                 break
             u, v = struct.unpack_from('>2h', self.data, uv_data_offset)
-            # Values are likely in 1/256 units, normalized to 0-1 range
+            # Values are in 1/256 units. UV coordinates may be outside 0-1 range
+            # for texture wrapping/tiling effects.
             uvs.append((u / 256.0, v / 256.0))
         
         return uvs
@@ -584,10 +585,17 @@ class NDMParser:
         full_dl_offset = node.mesh_data_offset + node.vertex_data_size
         bytes_per_vertex = self._detect_vertex_ref_format(full_dl_offset, dl_end, num_vertices)
         use_16bit = bytes_per_vertex == 6
-        uv_byte_offset = bytes_per_vertex - 1 if bytes_per_vertex == 3 else (bytes_per_vertex - 1)
-        # For 3-byte: UV at byte 2 (index 2)
-        # For 4-byte: UV at byte 3 (index 3)
-        # For 6-byte: UV at bytes 4-5 (indices 4-5)
+        
+        # Calculate UV byte offset based on format:
+        # 3-byte: pos:u8, attr:u8, uv:u8 -> UV at byte 2
+        # 4-byte: pos:u8, norm:u8, color:u8, uv:u8 -> UV at byte 3  
+        # 6-byte: pos:u16, norm:u16, uv:u16 -> UV at bytes 4-5
+        if bytes_per_vertex == 3:
+            uv_byte_offset = 2
+        elif bytes_per_vertex == 4:
+            uv_byte_offset = 3
+        else:  # 6-byte format
+            uv_byte_offset = 4
             
         faces = []
         uv_faces = []
@@ -642,12 +650,14 @@ class NDMParser:
                     if idx_offset + bytes_per_vertex > len(self.data):
                         break
                     
-                    # Extract position index
+                    # Extract position index and UV index
                     if use_16bit:
                         pos_idx = struct.unpack_from('>H', self.data, idx_offset)[0]
-                        uv_idx = struct.unpack_from('>H', self.data, idx_offset + 4)[0]
+                        # For 6-byte format, UV is at offset 4 (bytes 4-5)
+                        uv_idx = struct.unpack_from('>H', self.data, idx_offset + uv_byte_offset)[0]
                     else:
                         pos_idx = self.data[idx_offset]
+                        # For 3-byte or 4-byte format, UV is at calculated offset
                         uv_idx = self.data[idx_offset + uv_byte_offset]
                     
                     if pos_idx < num_vertices:
@@ -794,17 +804,19 @@ def import_ndm(context, filepath, import_textures=True, scale_factor=0.01):
                     # Create UV layer
                     uv_layer = mesh.uv_layers.new(name="UVMap")
                     
-                    # Apply UVs per face loop
+                    # Apply UVs per face loop, skipping invalid UV indices
                     for face_idx, face in enumerate(mesh.polygons):
                         if face_idx < len(uv_faces):
                             uv_indices = uv_faces[face_idx]
                             for loop_idx, loop in enumerate(face.loop_indices):
                                 if loop_idx < len(uv_indices):
                                     uv_idx = uv_indices[loop_idx]
+                                    # Bound check UV index
                                     if uv_idx < len(uvs):
                                         uv_layer.data[loop].uv = uvs[uv_idx]
+                                    # If UV index is out of range, leave default UV (0,0)
                     
-                    print(f"Applied {len(uvs)} UVs to '{node.name}'")
+                    print(f"Applied UVs to '{node.name}' ({len(uvs)} UV coords available)")
                 except Exception as e:
                     print(f"Warning: Error applying UVs to '{node.name}': {e}")
             

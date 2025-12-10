@@ -32,17 +32,20 @@ NDM files contain:
 - Mesh data (vertices as signed int16 triplets, scaled by 1/256)
 - Display lists (GameCube GX commands for face definitions)
 
+## Recent Improvements
+
+- ✅ UV coordinates are now extracted from mesh data and applied to meshes
+  - Successfully applies UVs for many models
+  - Some models have incomplete UV data or use alternative storage (gracefully handled)
+- ✅ Vertex colors from node colors are now applied to meshes
+- ✅ Improved display list parsing for better compatibility
+
 ## Limitations
 
 - Textures are not imported (only referenced by name, requires DTX file parsing)
-- Animations are not supported
+- UV data may be incomplete for some complex models (out-of-range indices use default UVs)
+- Animations are not supported (may require separate animation files)
 - Normal vectors are not yet extracted from display lists
-
-## Recent Improvements
-
-- ✅ UV coordinates are now imported and applied to meshes
-- ✅ Vertex colors from node colors are now applied to meshes
-- ✅ Improved display list parsing for better compatibility
 
 ## License
 

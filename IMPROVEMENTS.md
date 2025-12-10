@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the improvements made to the NDM importer to enable "perfect" import of all models from the Nintendo 64 ind-nddemo (Peach's Castle Demo).
+This document describes the improvements made to the NDM importer to enable "perfect" import of all models from the Nintendo GameCube ind-nddemo (Peach's Castle Demo).
 
 ## Key Improvements
 
@@ -114,9 +114,11 @@ All 16 files pass validation with 100% success rate.
    - Texture image decoding (likely GameCube texture formats)
    - Material creation with texture assignment
 
-2. **Animations**: Animation data is not present in NDM files (may be in separate files)
+2. **UV Data Completeness**: While UV coordinates are now extracted and applied, some meshes have UV indices that exceed the parsed UV array size. This suggests the UV data storage format may vary between files or additional UV data exists in unidentified locations. When UV indices are out of range, default UVs (0,0) are used. This affects some meshes in files like BIPLANE.NDM, STG_CAVE.NDM, and others.
 
-3. **Normal Vectors**: Normal indices are present in display lists but normal data extraction is not yet implemented
+3. **Animations**: Animation data is not present in NDM files (may be in separate files)
+
+4. **Normal Vectors**: Normal indices are present in display lists but normal data extraction is not yet implemented
 
 ## Future Enhancements
 
