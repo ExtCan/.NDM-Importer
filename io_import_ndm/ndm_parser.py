@@ -965,12 +965,9 @@ def import_ndm(context, filepath, import_textures=True, scale_factor=0.01, merge
             # Create object
             obj = bpy.data.objects.new(mesh_name, mesh)
             
-            # Apply node transforms (position, rotation, scale)
-            obj.location = (node.position[0] * scale_factor,
-                          node.position[1] * scale_factor,
-                          node.position[2] * scale_factor)
-            obj.scale = node.scale
-            # Note: rotation data not implemented yet (would need quaternion or euler angles)
+            # Note: Node transforms (position, scale, rotation) are NOT applied
+            # because vertices appear to be in world/final coordinates already.
+            # Applying transforms would incorrectly transform the geometry.
             
             # Apply UV coordinates if available
             if len(uvs) > 0 and len(uv_faces) > 0:
