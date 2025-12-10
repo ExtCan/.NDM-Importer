@@ -64,7 +64,7 @@ MAX_DL_HEADER_SIZE = 0x1000  # Maximum valid display list header size
 # Format detection constants  
 MAX_HEADER_SCAN_BYTES = 200  # Maximum bytes to scan for first draw command
 MIN_DRAW_COUNT = 4  # Minimum vertex count for valid draw command
-MAX_DRAW_COUNT = 2000  # Maximum vertex count for format detection sampling
+MAX_DRAW_COUNT = 20000  # Maximum vertex count for format detection sampling (increased for large models like KURIBO)
 SAMPLE_REFS_COUNT = 6  # Number of vertex references to sample for format detection
 MIN_BOTH_ZERO_4BYTE = 5  # Minimum refs with bytes 1,2 both zero to detect 4-byte format
 
@@ -356,24 +356,17 @@ class NDMParser:
         return uvs
         
     def _detect_vertex_ref_format(self, dl_offset, dl_end, num_vertices):
-        """Detect vertex reference format (3-byte or 4-byte) from display list data.
+        """Detect vertex reference format (3-byte, 4-byte, or 6-byte) from display list data.
         
         Returns bytes_per_vertex (3, 4, or 6 for 16-bit indices).
         
-        Format detection strategies:
-        - 4-byte: pos:u8, norm:u8, color:u8, uv:u8 
-          - Both bytes 1 AND 2 are often 0 for all refs
-          - Or positions at 4-byte intervals are sequential (0,1,2,3...)
-        - 3-byte: pos:u8, attr:u8, uv:u8
-          - Byte 1 is often 0 (attr=0 or same as pos)
-          - Positions at 3-byte intervals are valid and varied
-        - 6-byte: pos:u16, norm:u16, uv:u16
-          - Used when vertex indices in display list exceed 255
-          - Note: vertex count > 255 doesn't guarantee 6-byte format
+        Detection strategy:
+        1. Find first draw command
+        2. Try interpreting refs as 3-byte, 4-byte, and 6-byte
+        3. Check which interpretation gives valid, sequential indices
+        4. Prefer 6-byte if it's valid and sequential (even if 3-byte also works)
+        5. Check for specific patterns (e.g., norm:0, color:0 for 4-byte)
         """
-        # Don't assume 6-byte format just because vertex count > 255
-        # The display list might only reference a subset with 8-bit indices
-        
         # Find first draw command
         offset = dl_offset
         while offset < min(dl_end, dl_offset + MAX_HEADER_SCAN_BYTES) and offset < len(self.data) - 3:
@@ -381,100 +374,97 @@ class NDMParser:
             if cmd == 0x80 and offset + 30 < len(self.data):
                 count = struct.unpack_from('>H', self.data, offset + 1)[0]
                 if MIN_DRAW_COUNT <= count <= MAX_DRAW_COUNT:
-                    # Read first 24 bytes of vertex refs
-                    refs = self.data[offset + 3:offset + 3 + 24]
+                    refs_start = offset + 3
                     
-                    # Strategy 1: Check if bytes 1,2 in 4-byte groups are both 0
-                    both_zero_4byte = sum(1 for j in range(SAMPLE_REFS_COUNT) if j*4+2 < len(refs) and 
+                    # Sample first N vertex references in different formats
+                    sample_size = min(count, 8)
+                    
+                    # Try 3-byte format
+                    pos_3byte = []
+                    for j in range(sample_size):
+                        idx_offset = refs_start + j * 3
+                        if idx_offset < len(self.data):
+                            pos_3byte.append(self.data[idx_offset])
+                    
+                    # Try 4-byte format  
+                    pos_4byte = []
+                    for j in range(sample_size):
+                        idx_offset = refs_start + j * 4
+                        if idx_offset < len(self.data):
+                            pos_4byte.append(self.data[idx_offset])
+                    
+                    # Try 6-byte format (16-bit big-endian)
+                    pos_6byte = []
+                    for j in range(sample_size):
+                        idx_offset = refs_start + j * 6
+                        if idx_offset + 1 < len(self.data):
+                            pos_6byte.append(struct.unpack_from('>H', self.data, idx_offset)[0])
+                    
+                    # Check validity (all indices < vertex count) AND variety (not all same)
+                    valid_3 = len(pos_3byte) >= 4 and all(p < num_vertices for p in pos_3byte)
+                    valid_4 = len(pos_4byte) >= 4 and all(p < num_vertices for p in pos_4byte)
+                    valid_6 = len(pos_6byte) >= 4 and all(p < num_vertices for p in pos_6byte)
+                    
+                    # Check for variety in indices (not all the same value)
+                    variety_3 = len(set(pos_3byte)) > 1
+                    variety_4 = len(set(pos_4byte)) > 1
+                    variety_6 = len(set(pos_6byte)) > 1
+                    
+                    # Check sequentiality (indices are close to each other, suggesting real geometry)
+                    def is_sequential(indices):
+                        if len(indices) < 3:
+                            return False
+                        # Allow differences up to 10 (for strips, fans with more variation)
+                        return all(abs(indices[i+1] - indices[i]) <= 10 for i in range(len(indices)-1))
+                    
+                    sequential_3 = is_sequential(pos_3byte) if valid_3 and variety_3 else False
+                    sequential_4 = is_sequential(pos_4byte) if valid_4 and variety_4 else False
+                    sequential_6 = is_sequential(pos_6byte) if valid_6 and variety_6 else False
+                    
+                    # Priority 1: If 6-byte is valid, has variety, and sequential, prefer it
+                    # This catches KURIBO (4221 vertices, needs 16-bit)
+                    if valid_6 and variety_6 and sequential_6:
+                        return 6
+                    
+                    # Priority 2: Check for 4-byte format indicators
+                    # (bytes 1 and 2 are often 0 for norm:0, color:0)
+                    refs = self.data[refs_start:refs_start + 24]
+                    both_zero_4byte = sum(1 for j in range(6) if j*4+2 < len(refs) and 
                                          refs[j*4+1] == 0 and refs[j*4+2] == 0)
-                    
-                    if both_zero_4byte >= MIN_BOTH_ZERO_4BYTE:
-                        return 4  # Clearly 4-byte format
-                    
-                    # Strategy 2: Check if 4-byte positions form a sequential quad
-                    pos_4byte = [refs[j * 4] for j in range(min(4, len(refs) // 4))]
-                    is_sequential_quad_4byte = (
-                        len(pos_4byte) >= 4 and
-                        all(p < num_vertices for p in pos_4byte) and
-                        (pos_4byte == [0, 1, 2, 3] or 
-                         pos_4byte == [pos_4byte[0], pos_4byte[0]+1, pos_4byte[0]+2, pos_4byte[0]+3])
-                    )
-                    
-                    pos_3byte = [refs[j * 3] for j in range(min(4, len(refs) // 3))]
-                    is_sequential_quad_3byte = (
-                        len(pos_3byte) >= 4 and
-                        all(p < num_vertices for p in pos_3byte) and
-                        (pos_3byte == [0, 1, 2, 3] or 
-                         pos_3byte == [pos_3byte[0], pos_3byte[0]+1, pos_3byte[0]+2, pos_3byte[0]+3])
-                    )
-                    
-                    # If 4-byte gives sequential and 3-byte doesn't, use 4-byte
-                    if is_sequential_quad_4byte and not is_sequential_quad_3byte:
+                    if both_zero_4byte >= 5:
                         return 4
                     
-                    # If 3-byte gives sequential and 4-byte doesn't, use 3-byte
-                    if is_sequential_quad_3byte and not is_sequential_quad_4byte:
+                    # Priority 3: Check for sequential patterns
+                    # Sequential quads: 0,1,2,3 or n,n+1,n+2,n+3
+                    is_quad_4byte = (len(pos_4byte) >= 4 and valid_4 and
+                                    (pos_4byte[:4] == [0,1,2,3] or 
+                                     pos_4byte[:4] == list(range(pos_4byte[0], pos_4byte[0]+4))))
+                    is_quad_3byte = (len(pos_3byte) >= 4 and valid_3 and
+                                    (pos_3byte[:4] == [0,1,2,3] or 
+                                     pos_3byte[:4] == list(range(pos_3byte[0], pos_3byte[0]+4))))
+                    
+                    if is_quad_4byte and not is_quad_3byte:
+                        return 4
+                    if is_quad_3byte and not is_quad_4byte:
                         return 3
                     
-                    # If both or neither are sequential, check byte patterns
-                    # In 3-byte format, byte 1 is often 0
+                    # Priority 4: General sequentiality check
+                    if sequential_3:
+                        return 3
+                    if sequential_4:
+                        return 4
+                    
+                    # Priority 5: Check byte 1 patterns (often 0 in 3-byte)
                     zeros_3byte = sum(1 for j in range(8) if j*3+1 < len(refs) and refs[j*3+1] == 0)
-                    
                     if zeros_3byte >= 6:
-                        return 3  # High zero count in 3-byte format
+                        return 3
                     
-                    # Check if any position indices in 3-byte interpretation exceed 255
-                    # which would indicate we need 6-byte format
-                    if count >= 10:  # Need enough data to check
-                        # Try interpreting as 3-byte and check for >255 indices
-                        has_large_idx_3byte = False
-                        for j in range(min(count, 20)):
-                            if j * 3 < len(refs):
-                                pos_idx = refs[j * 3]
-                                if pos_idx > 255:
-                                    has_large_idx_3byte = True
-                                    break
-                        
-                        # Try interpreting as 6-byte and check if indices make sense
-                        has_valid_idx_6byte = True
-                        if len(refs) >= 12:  # At least 2 full 6-byte refs
-                            for j in range(min(count, 10)):
-                                if j * 6 + 1 < len(refs):
-                                    pos_idx = (refs[j * 6] << 8) | refs[j * 6 + 1]
-                                    # Check if this looks like a reasonable vertex index
-                                    if pos_idx > num_vertices or pos_idx > 10000:
-                                        has_valid_idx_6byte = False
-                                        break
-                        
-                        if has_large_idx_3byte and has_valid_idx_6byte:
-                            return 6
-                    
-                    # Default to 3-byte
+                    # Default to 3-byte if nothing else detected
                     return 3
             offset += 1
         
-        # Final check: try to detect 6-byte by checking if any command has indices > 255
-        # Scan more of the display list
-        offset = dl_offset
-        while offset < min(dl_end, dl_offset + 1000) and offset < len(self.data) - 10:
-            cmd = self.data[offset]
-            if cmd in [0x80, 0x90, 0x98, 0xA0] and offset + 10 < len(self.data):
-                count = struct.unpack_from('>H', self.data, offset + 1)[0]
-                if 3 <= count <= MAX_DRAW_COUNT:
-                    refs_start = offset + 3
-                    # Check first few references as 3-byte
-                    needs_16bit = False
-                    for j in range(min(count, 5)):
-                        if refs_start + j * 3 < len(self.data):
-                            pos_idx = self.data[refs_start + j * 3]
-                            if pos_idx > 250:  # Likely needs 16-bit if seeing indices this high
-                                needs_16bit = True
-                                break
-                    if needs_16bit:
-                        return 6
-            offset += 1
-        
-        return 3  # Default
+        # No draw command found, default to 3-byte
+        return 3
     
     def get_mesh_faces(self, node, num_vertices):
         """Extract face indices from a node's display list
