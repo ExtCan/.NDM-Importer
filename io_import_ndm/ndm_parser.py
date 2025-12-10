@@ -759,8 +759,16 @@ class NDMParser:
         return faces, uv_faces
 
 
-def import_ndm(context, filepath, import_textures=True, scale_factor=0.01):
-    """Import an NDM file and create Blender objects"""
+def import_ndm(context, filepath, import_textures=True, scale_factor=0.01, merge_meshes=False):
+    """Import an NDM file and create Blender objects
+    
+    Args:
+        context: Blender context
+        filepath: Path to NDM file
+        import_textures: Whether to import textures (not implemented yet)
+        scale_factor: Scale factor for vertices
+        merge_meshes: If True, merge all meshes into a single object (alternative method)
+    """
     
     if not HAS_BLENDER:
         print("Error: Blender modules not available")
@@ -794,14 +802,105 @@ def import_ndm(context, filepath, import_textures=True, scale_factor=0.01):
     if len(mesh_nodes) > 1:
         print(f"\n⚠ MULTI-MESH FILE DETECTED")
         print(f"  This file contains {len(mesh_nodes)} separate mesh objects.")
-        print(f"  Each mesh will be imported as a separate Blender object.")
+        if merge_meshes:
+            print(f"  Merge mode enabled: All meshes will be combined into a single object.")
+        else:
+            print(f"  Each mesh will be imported as a separate Blender object.")
     
     # Create a collection for the imported model
     model_name = os.path.splitext(os.path.basename(filepath))[0]
     collection = bpy.data.collections.new(model_name)
     context.scene.collection.children.link(collection)
     
-    # Create objects for each node
+    # Alternative import method: Merge all meshes into one
+    if merge_meshes and len(mesh_nodes) > 0:
+        print(f"\nMerging {len(mesh_nodes)} meshes into single object...")
+        
+        all_vertices = []
+        all_faces = []
+        all_uvs = []
+        all_uv_faces = []
+        vertex_offset = 0
+        uv_offset = 0
+        
+        for node in parser.nodes:
+            if not node.has_mesh:
+                continue
+            
+            vertices = parser.get_mesh_vertices(node)
+            if len(vertices) == 0:
+                continue
+            
+            faces, uv_faces = parser.get_mesh_faces_and_uvs(node, len(vertices))
+            uvs = parser.get_mesh_uvs(node)
+            
+            # Add vertices with offset
+            all_vertices.extend(vertices)
+            
+            # Add faces with vertex offset
+            for face in faces:
+                offset_face = tuple(idx + vertex_offset for idx in face)
+                all_faces.append(offset_face)
+            
+            # Add UVs
+            all_uvs.extend(uvs)
+            
+            # Add UV faces with UV offset
+            for uv_face in uv_faces:
+                offset_uv_face = tuple(idx + uv_offset for idx in uv_face)
+                all_uv_faces.append(offset_uv_face)
+            
+            vertex_offset += len(vertices)
+            uv_offset += len(uvs)
+        
+        # Create single merged mesh
+        mesh = bpy.data.meshes.new(model_name)
+        scaled_verts = [(v[0] * scale_factor, v[1] * scale_factor, v[2] * scale_factor) 
+                       for v in all_vertices]
+        
+        if len(all_faces) > 0:
+            mesh.from_pydata(scaled_verts, [], all_faces)
+        else:
+            mesh.from_pydata(scaled_verts, [], [])
+        
+        mesh.update()
+        mesh.validate()
+        
+        # Create object
+        obj = bpy.data.objects.new(model_name, mesh)
+        
+        # Apply UVs if available
+        if len(all_uvs) > 0 and len(all_uv_faces) > 0:
+            try:
+                uv_layer = mesh.uv_layers.new(name="UVMap")
+                
+                for face_idx, face in enumerate(mesh.polygons):
+                    if face_idx < len(all_uv_faces):
+                        uv_indices = all_uv_faces[face_idx]
+                        for loop_idx, loop in enumerate(face.loop_indices):
+                            if loop_idx < len(uv_indices):
+                                uv_idx = uv_indices[loop_idx]
+                                if uv_idx < len(all_uvs):
+                                    uv_layer.data[loop].uv = all_uvs[uv_idx]
+                
+                print(f"Applied {len(all_uvs)} UVs to merged mesh")
+            except Exception as e:
+                print(f"Warning: Error applying UVs: {e}")
+        
+        collection.objects.link(obj)
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        
+        print(f"\n{'='*60}")
+        print(f"Merged Import Complete!")
+        print(f"  Total vertices: {len(all_vertices)}")
+        print(f"  Total faces: {len(all_faces)}")
+        print(f"  Total UVs: {len(all_uvs)}")
+        print(f"{'='*60}\n")
+        
+        return {'FINISHED'}
+    
+    # Standard import method: Create separate objects for each node
     created_objects = {}
     mesh_count = 0
     used_names = set()  # Track used names for O(1) duplicate checking
@@ -864,6 +963,13 @@ def import_ndm(context, filepath, import_textures=True, scale_factor=0.01):
             
             # Create object
             obj = bpy.data.objects.new(mesh_name, mesh)
+            
+            # Apply node transforms (position, rotation, scale)
+            obj.location = (node.position[0] * scale_factor,
+                          node.position[1] * scale_factor,
+                          node.position[2] * scale_factor)
+            obj.scale = node.scale
+            # Note: rotation data not implemented yet (would need quaternion or euler angles)
             
             # Apply UV coordinates if available
             if len(uvs) > 0 and len(uv_faces) > 0:

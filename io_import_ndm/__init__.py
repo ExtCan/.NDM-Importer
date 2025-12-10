@@ -52,9 +52,16 @@ class ImportNDM(bpy.types.Operator):
         min=0.0001,
         max=100.0,
     )
+    
+    merge_meshes: BoolProperty(
+        name="Merge Meshes",
+        description="Merge all meshes into a single object (alternative import method)",
+        default=False,
+    )
 
     def execute(self, context):
-        return ndm_parser.import_ndm(context, self.filepath, self.import_textures, self.scale_factor)
+        return ndm_parser.import_ndm(context, self.filepath, self.import_textures, 
+                                     self.scale_factor, self.merge_meshes)
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
@@ -64,6 +71,7 @@ class ImportNDM(bpy.types.Operator):
         layout = self.layout
         layout.prop(self, "import_textures")
         layout.prop(self, "scale_factor")
+        layout.prop(self, "merge_meshes")
 
 
 def menu_func_import(self, context):
