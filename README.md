@@ -34,18 +34,22 @@ NDM files contain:
 
 ## Recent Improvements
 
-### Latest Fixes (v2)
+### Latest Fixes (v3 - December 10, 2025)
+- ✅ **Fixed broken format detection** - Previous "fix" broke all models
+  - Increased MAX_DRAW_COUNT to 20000 (was 2000, too low for KURIBO with 15128 vertices)
+  - Added variety check to prevent false positives from all-zero indices
+  - Relaxed sequentiality threshold from ±3 to ±10
+  - KURIBO now correctly imports with 8,254 faces (6-byte format)
+  - All 16 test files parse successfully ✓
+
+### Bugfixes (v2)
 - ✅ **Fixed vertex colors** - Were green due to wrong offset (0x30/0x34 → 0x38/0x3C)
-- ✅ **Fixed format detection** - Don't assume 6-byte format just because vertex count > 255
-- ✅ **Dramatically improved geometry import** - Many models now import 2-10x more faces
+- ✅ **Improved face extraction** - Many models now import 2-10x more faces
   - BIPLANE: 4,611 → 9,187 faces (2x)
   - STG_CAVE: 5,045 → 49,706 faces (10x)
-  - KURIBO: 8,254 → 17,233 faces (2x)
 
 ### Initial Implementation (v1)
 - ✅ UV coordinates extracted from mesh data and applied to meshes
-  - Successfully applies UVs for most models
-  - Some models have incomplete UV data or sentinel values (handled gracefully)
 - ✅ Vertex colors from node colors applied to meshes
 - ✅ Improved display list parsing for better compatibility
 
