@@ -778,7 +778,24 @@ def import_ndm(context, filepath, import_textures=True, scale_factor=0.01):
     if len(parser.nodes) == 0:
         print("No nodes found in NDM file")
         return {'CANCELLED'}
-        
+    
+    # Analyze file structure
+    mesh_nodes = [n for n in parser.nodes if n.has_mesh]
+    non_mesh_nodes = [n for n in parser.nodes if not n.has_mesh]
+    
+    print(f"\n{'='*60}")
+    print(f"Importing NDM: {os.path.basename(filepath)}")
+    print(f"{'='*60}")
+    print(f"Total nodes: {len(parser.nodes)}")
+    print(f"  - Mesh nodes: {len(mesh_nodes)}")
+    print(f"  - Transform/Empty nodes: {len(non_mesh_nodes)}")
+    print(f"Texture references: {len(parser.textures)}")
+    
+    if len(mesh_nodes) > 1:
+        print(f"\n⚠ MULTI-MESH FILE DETECTED")
+        print(f"  This file contains {len(mesh_nodes)} separate mesh objects.")
+        print(f"  Each mesh will be imported as a separate Blender object.")
+    
     # Create a collection for the imported model
     model_name = os.path.splitext(os.path.basename(filepath))[0]
     collection = bpy.data.collections.new(model_name)
@@ -799,12 +816,23 @@ def import_ndm(context, filepath, import_textures=True, scale_factor=0.01):
             if len(vertices) == 0:
                 print(f"Warning: Node '{node.name}' has no vertices")
                 continue
+            
+            # Detect format for this specific mesh
+            dl_offset = node.mesh_data_offset + node.vertex_data_size
+            dl_end = node.mesh_data_offset + node.vertex_data_size + node.display_list_size
+            detected_format = parser._detect_vertex_ref_format(dl_offset, dl_end, len(vertices))
                 
             # Get faces and UV indices
             faces, uv_faces = parser.get_mesh_faces_and_uvs(node, len(vertices))
             
             # Get UV coordinates if available
             uvs = parser.get_mesh_uvs(node)
+            
+            # Log mesh processing
+            if mesh_count < 5 or len(mesh_nodes) <= 5:
+                print(f"  Processing mesh '{node.name}': "
+                      f"{len(vertices)} verts, {len(faces)} faces, "
+                      f"{len(uvs)} UVs ({detected_format}-byte format)")
             
             # Create mesh with unique name
             if node.name in used_names:
@@ -896,7 +924,16 @@ def import_ndm(context, filepath, import_textures=True, scale_factor=0.01):
     if created_objects:
         context.view_layer.objects.active = list(created_objects.values())[0]
     
-    print(f"Imported {mesh_count} meshes and {len(created_objects) - mesh_count} empties from {filepath}")
-    print(f"Textures referenced: {parser.textures}")
+    # Final summary
+    print(f"\n{'='*60}")
+    print(f"Import Complete!")
+    print(f"  Created {mesh_count} mesh objects")
+    print(f"  Created {len(created_objects) - mesh_count} empty/transform objects")
+    print(f"  Total objects: {len(created_objects)}")
+    if parser.textures:
+        print(f"  Texture references: {', '.join(parser.textures[:3])}")
+        if len(parser.textures) > 3:
+            print(f"    ... and {len(parser.textures) - 3} more")
+    print(f"{'='*60}\n")
     
     return {'FINISHED'}
